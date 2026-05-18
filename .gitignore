@@ -1,2 +1,3 @@
 whisper.cpp/
-
+venv/
+speech_commands/
