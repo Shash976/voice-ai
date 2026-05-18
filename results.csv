@@ -1,0 +1,2 @@
+timestamp,file,model,chunks,vad_lat_avg_ms,vad_lat_max_ms,whisper_lat_s,transcript_words
+2026-05-18T12:03:09.860682,whisper.cpp/samples/jfk.wav,tiny.en,10,29.3,32.8,95.57,22

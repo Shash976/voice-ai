@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raspberry Pi Whisper STT</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; text-align: center; }
+        button { font-size: 1.2rem; padding: 10px 20px; margin: 10px; cursor: pointer; border-radius: 5px; border: none; }
+        .record { background: #ff4d4d; color: white; }
+        .stop { background: #333; color: white; }
+        #output { margin-top: 20px; padding: 15px; background: #f4f4f4; border-radius: 5px; min-height: 50px; text-align: left; }
+    </style>
+</head>
+<body>
+
+    <h2>Whisper.cpp Prototype (Pi 4)</h2>
+    <p>Record audio to transcribe using the local <b>Tiny</b> model.</p>
+    
+    <button id="startBtn" class="record">🔴 Start Recording</button>
+    <button id="stopBtn" class="stop" disabled>⏹️ Stop & Transcribe</button>
+
+    <h3>Transcription:</h3>
+    <div id="output">Results will appear here...</div>
+
+    <script>
+        let mediaRecorder;
+        let audioChunks = [];
+        // Replace with your Pi's actual IP address if accessing from another device
+        const SERVER_URL = "http://localhost:8080/inference"; 
+
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const output = document.getElementById('output');
+
+        startBtn.onclick = async () => {
+            audioChunks = [];
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorder = new MediaRecorder(stream);
+            
+            mediaRecorder.ondataavailable = event => audioChunks.push(event.data);
+            mediaRecorder.onstop = sendAudioToServer;
+            
+            mediaRecorder.start();
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            output.innerText = "Recording...";
+        };
+
+        stopBtn.onclick = () => {
+            mediaRecorder.stop();
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            output.innerText = "Processing audio on Raspberry Pi...";
+        };
+
+        async function sendAudioToServer() {
+            // Whisper.cpp prefers WAV, but modern browsers record in WebM/Ogg container. 
+            // The whisper-server binary uses ffmpeg internally to auto-convert incoming files!
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+            
+            const formData = new FormData();
+            formData.append('file', audioBlob, 'audio.webm');
+            formData.append('response_format', 'json');
+
+            try {
+                const response = await fetch(SERVER_URL, {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+                output.innerText = data.text || "Could not understand audio.";
+            } catch (err) {
+                output.innerText = "Error connecting to Whisper server: " + err.message;
+            }
+        }
+    </script>
+</body>
+</html>
