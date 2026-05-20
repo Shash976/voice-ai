@@ -15,48 +15,95 @@ import soundfile as sf
 import tflite_runtime.interpreter as tflite
 import subprocess, time, tempfile, os, csv, datetime
 
-# librosa is used only for TinyVAD log-mel extraction.
-# Install with: pip install librosa
-try:
-    import librosa
-    _LIBROSA_OK = True
-except ImportError:
-    _LIBROSA_OK = False
-
 SAMPLE_RATE = 16000
 CHUNK_SEC   = 1
 
-# TinyVAD feature constants — must match train_tiny_vad.py exactly so that
-# the feature vectors fed to the TFLite model are identical to training.
+# TinyVAD feature constants — must match train_tiny_vad.py exactly.
 N_MEL    = 40
 N_FRAMES = 49
+_N_FFT   = 512
+_WIN_LEN = 400
+_HOP_LEN = 160
+
+# ── mel filterbank (built once, reused every chunk) ───────────────────────────
+
+def _build_mel_fb():
+    """HTK mel filterbank matrix [N_MEL, n_fft//2+1], norm=None.
+
+    Matches torchaudio.transforms.MelSpectrogram defaults (mel_scale='htk',
+    norm=None).  We build this once at startup and cache it — it's constant
+    for the lifetime of the process and will be reused for every audio chunk.
+
+    This is also the function we'll port to C when writing the PicoRV32
+    firmware feature extractor.  The filterbank is just a fixed float matrix
+    multiply, which maps neatly to the int8 MAC accelerator in Stage 3.
+    """
+    def hz_to_mel(f): return 2595.0 * np.log10(1.0 + f / 700.0)
+    def mel_to_hz(m): return 700.0 * (10.0 ** (m / 2595.0) - 1.0)
+
+    n_freqs   = _N_FFT // 2 + 1
+    fft_freqs = np.linspace(0.0, SAMPLE_RATE / 2.0, n_freqs)
+    mel_pts   = np.linspace(hz_to_mel(80.0), hz_to_mel(7600.0), N_MEL + 2)
+    hz_pts    = mel_to_hz(mel_pts)
+
+    fb = np.zeros((N_MEL, n_freqs), dtype=np.float32)
+    for m in range(N_MEL):
+        lo, ctr, hi = hz_pts[m], hz_pts[m + 1], hz_pts[m + 2]
+        up   = (fft_freqs >= lo)  & (fft_freqs <= ctr)
+        down = (fft_freqs >  ctr) & (fft_freqs <= hi)
+        if ctr > lo:
+            fb[m, up]   = (fft_freqs[up]   - lo)  / (ctr - lo)
+        if hi > ctr:
+            fb[m, down] = (hi - fft_freqs[down]) / (hi  - ctr)
+    return fb
+
+_MEL_FB = _build_mel_fb()   # computed once at import time
 
 # ── feature extraction for TinyVAD ───────────────────────────────────────────
 
 def extract_logmel(chunk):
-    """Convert a 1-second float32 PCM chunk → [N_FRAMES, N_MEL] log-mel array.
+    """Convert a 1-second float32 PCM chunk → [N_FRAMES, N_MEL] log-mel.
 
-    Parameters match train_tiny_vad.py: n_fft=512, win=400, hop=160,
-    n_mels=40, fmin=80, fmax=7600.  This is critical — a mismatch here would
-    silently produce wrong activations even with correct weights.
+    Pure numpy — no librosa/torch dependency.  Parameters match
+    train_tiny_vad.py exactly (n_fft=512, win=400, hop=160, n_mels=40,
+    fmin=80, fmax=7600, HTK mel scale, no filterbank normalization).
 
-    This function will also serve as the golden reference when we later write
-    the C feature-extraction code for PicoRV32 firmware (Stage 2 milestone).
+    Steps:
+      1. Reflect-pad by n_fft//2 on each side  (matches torchaudio center=True)
+      2. Frame with periodic Hann window        (matches torch.hann_window)
+      3. rfft → power spectrum
+      4. Mel filterbank matrix multiply
+      5. log(mel + 1e-6)
+
+    This function doubles as the golden reference for the C feature extractor
+    we'll write in Stage 2.  Every step here has a direct C equivalent.
     """
-    if not _LIBROSA_OK:
-        raise ImportError("librosa is required for TinyVAD. Run: pip install librosa")
-    mel = librosa.feature.melspectrogram(
-        y=chunk, sr=SAMPLE_RATE,
-        n_fft=512, win_length=400, hop_length=160,
-        n_mels=N_MEL, fmin=80.0, fmax=7600.0,
-        htk=True, norm=None,   # match torchaudio defaults used during training
+    # 1. center-pad (reflect) so frame 0 is centered on sample 0
+    chunk = np.pad(chunk, _N_FFT // 2, mode='reflect')
+
+    # 2. periodic Hann window of size win_length, zero-padded to n_fft
+    #    np.hanning gives a symmetric window; [:-1] makes it periodic
+    win = np.hanning(_WIN_LEN + 1)[:-1].astype(np.float32)
+    pad_w = _N_FFT - _WIN_LEN
+    win   = np.pad(win, (pad_w // 2, pad_w - pad_w // 2))
+
+    # 3. frame + rfft using stride tricks (no copy of the signal)
+    n_frames = 1 + (len(chunk) - _N_FFT) // _HOP_LEN
+    frames   = np.lib.stride_tricks.as_strided(
+        chunk,
+        shape=(n_frames, _N_FFT),
+        strides=(chunk.strides[0] * _HOP_LEN, chunk.strides[0]),
     )
-    log_mel = np.log(mel + 1e-6).T          # [frames, N_MEL], matches training
+    power = (np.abs(np.fft.rfft(frames * win, n=_N_FFT)) ** 2).T  # [n_freqs, n_frames]
+
+    # 4 & 5. mel filterbank then log
+    log_mel = np.log(_MEL_FB @ power.astype(np.float32) + 1e-6).T  # [n_frames, N_MEL]
+
     log_mel = log_mel[:N_FRAMES]
     pad = N_FRAMES - log_mel.shape[0]
     if pad > 0:
         log_mel = np.pad(log_mel, ((0, pad), (0, 0)))
-    return log_mel.astype(np.float32)       # [49, 40]
+    return log_mel.astype(np.float32)   # [49, 40]
 
 # ── VAD inference — TinyVAD (int8) ───────────────────────────────────────────
 
