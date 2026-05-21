@@ -3,16 +3,19 @@
  * int8 inference engine for TinyVAD.
  * Compiles for both x86 (host tests) and riscv32-unknown-elf (bare-metal).
  *
- * All arithmetic is int8/int32/int64 — no floats, no malloc.
+ * Tensor layout: [time, channel]  — matches TFLite NHWC convention.
+ *   Input    [N_FRAMES=49, N_MEL=40]:  inp[t * N_MEL + mel]
+ *   Conv0 out [CONV0_OUT_LEN=25, 32]:  buf[t * 32 + ch]
+ *   Conv1 out [CONV1_OUT_LEN=13, 64]:  buf[t * 64 + ch]
+ *   Pool  out [64]                  :  flat vector
+ *   FC0   out [32]                  :  flat vector
+ *   FC1   out [2]                   :  logits
  *
- * Uses per-channel quantized multipliers (one mult/rshift per output channel),
- * matching TFLite's default per-channel weight quantization.
+ * Weight layout: [out_ch, in_ch, kernel]  (same C-order as PyTorch after transpose)
+ *   w[(oc * in_ch + ic) * kernel + k]
  *
- * Quantization convention:
- *   float_val = scale * (int8_val - zero_point)
- *
- * The inner MAC loops (conv1d / dense) are the primary targets for
- * accelerator offload in Stage 3.  Each iteration is one int8 multiply-add.
+ * Quantization: float = scale * (int8 - zero_point)
+ * Per-channel multipliers: one (mult, rshift) pair per output channel.
  */
 
 #include <stdint.h>
@@ -21,20 +24,16 @@
 
 /* ── Static scratch buffers ─────────────────────────────────────────────────── */
 
-static int8_t buf0[TINYVAD_BUF0_SIZE];   /* conv0 output  [32, 25] */
-static int8_t buf1[TINYVAD_BUF1_SIZE];   /* conv1 output  [64, 13] */
-static int8_t buf2[TINYVAD_BUF2_SIZE];   /* pool  output  [64]     */
-static int8_t buf3[TINYVAD_BUF3_SIZE];   /* fc0   output  [32]     */
+static int8_t buf0[TINYVAD_BUF0_SIZE];   /* conv0 output [25, 32] */
+static int8_t buf1[TINYVAD_BUF1_SIZE];   /* conv1 output [13, 64] */
+static int8_t buf2[TINYVAD_BUF2_SIZE];   /* pool  output [64]     */
+static int8_t buf3[TINYVAD_BUF3_SIZE];   /* fc0   output [32]     */
 
 /* ── Fixed-point requantize ──────────────────────────────────────────────────
  *
- * Multiplies a 32-bit accumulator by a Q31 fixed-point multiplier then shifts.
- * Matches TFLite MultiplyByQuantizedMultiplier().
- *
- *   result ≈ x * (q_mult * 2^{-31}) * 2^{-shift}
- *
- * shift > 0 → right-shift (typical)
- * shift < 0 → left-shift  (pool layer when sc_in > sc_out)
+ * result ≈ x * (q_mult * 2^{-31}) * 2^{-shift}
+ * shift > 0 = right-shift (typical conv/dense)
+ * shift < 0 = left-shift  (pool layer when sc_in > sc_out)
  */
 static inline int32_t requantize(int32_t x, int32_t q_mult, int32_t shift)
 {
@@ -59,14 +58,12 @@ static inline int8_t clamp_i8(int32_t x)
 
 /* ── Conv1d ─────────────────────────────────────────────────────────────────
  *
- * Per-channel quantized 1-D convolution.
- * Weight layout: w[out_ch * in_ch * kernel]  (C-order: [oc][ic][k])
- * Input  layout: inp[in_ch * in_len]         (C-order: [ic][t])
- * Output layout: out[out_ch * out_len]       (C-order: [oc][t])
+ * Input  layout: inp[in_len * in_ch]   → inp[t * in_ch + ic]
+ * Output layout: out[out_len * out_ch] → out[t * out_ch + oc]
+ * Weight layout: w[out_ch * in_ch * kernel] → w[(oc*in_ch + ic)*kernel + k]
  *
- * q_mult[out_ch], rshift[out_ch] — per-channel multipliers.
- *
- * The oc/t/ic/k loops are the accelerator offload target in Stage 3.
+ * This [time, channel] layout matches TFLite and makes the inner ic/k loop
+ * stride-1 over the weight array — cache friendly for the accelerator.
  */
 static void conv1d(
     const int8_t  *inp,
@@ -81,14 +78,15 @@ static void conv1d(
     const int32_t *rshift,
     int relu)
 {
-    for (int oc = 0; oc < out_ch; oc++) {
-        for (int t = 0; t < out_len; t++) {
+    for (int t = 0; t < out_len; t++) {
+        for (int oc = 0; oc < out_ch; oc++) {
             int32_t acc = b[oc];
             for (int ic = 0; ic < in_ch; ic++) {
                 for (int k = 0; k < kernel; k++) {
                     int pos = t * stride + k - pad;
                     if (pos >= 0 && pos < in_len) {
-                        int32_t x  = (int32_t)inp[ic * in_len + pos] - in_zp;
+                        /* [time, channel] input: inp[pos * in_ch + ic] */
+                        int32_t x  = (int32_t)inp[pos * in_ch + ic] - in_zp;
                         int32_t wv = (int32_t)w[(oc * in_ch + ic) * kernel + k];
                         acc += x * wv;
                     }
@@ -96,15 +94,16 @@ static void conv1d(
             }
             int32_t r = requantize(acc, q_mult[oc], rshift[oc]) + out_zp;
             if (relu && r < out_zp) r = out_zp;
-            out[oc * out_len + t] = clamp_i8(r);
+            /* [time, channel] output: out[t * out_ch + oc] */
+            out[t * out_ch + oc] = clamp_i8(r);
         }
     }
 }
 
 /* ── GlobalAvgPool1d ─────────────────────────────────────────────────────────
  *
- * Input [ch * len] → output [ch].
- * Single per-tensor multiplier (pool has no weight, so per-tensor is correct).
+ * Input layout: inp[len * ch] → inp[t * ch + c]
+ * Output: flat [ch] vector (feeds directly into Dense).
  */
 static void global_avg_pool(
     const int8_t *inp,
@@ -116,9 +115,9 @@ static void global_avg_pool(
     for (int c = 0; c < ch; c++) {
         int32_t sum = 0;
         for (int t = 0; t < len; t++) {
-            sum += (int32_t)inp[c * len + t] - in_zp;
+            sum += (int32_t)inp[t * ch + c] - in_zp;
         }
-        /* integer average (round to nearest) */
+        /* round-to-nearest integer average */
         int32_t avg = (sum >= 0) ? (sum + len / 2) / len
                                  : (sum - len / 2) / len;
         int32_t r = requantize(avg, q_mult, rshift) + out_zp;
@@ -128,9 +127,8 @@ static void global_avg_pool(
 
 /* ── Dense (fully-connected) ────────────────────────────────────────────────
  *
- * Matrix-vector multiply.
- * Weight layout: w[out * in]  (C-order: [o][i])
- * Per-channel q_mult[out], rshift[out].
+ * Input/output are flat 1D vectors — no layout ambiguity.
+ * Weight layout: w[out_dim * in] → w[o * in + i]
  */
 static void dense(
     const int8_t  *inp,
@@ -158,14 +156,13 @@ static void dense(
 
 /* ── Public inference function ───────────────────────────────────────────────
  *
- * Input:  int8[N_FRAMES * N_MEL] = int8[49 * 40], row-major [frames][mels].
- * The conv layers expect [channels][time] = [N_MEL][N_FRAMES].
- * Since N_MEL is the "channel" dimension and N_FRAMES is "time", the memory
- * layout is identical — we just reinterpret the strides.
+ * input: int8[N_FRAMES * N_MEL] in row-major [frame, mel] order.
+ *        Exactly the layout produced by extract_logmel() quantized to int8.
+ *        This is also what TFLite receives, so no transposition needed.
  */
 int tiny_vad_infer(const int8_t *input, int8_t *logits)
 {
-    /* Conv0 + ReLU  →  buf0 [32, 25] */
+    /* Conv0 + ReLU  →  buf0 [25, 32] */
     conv1d(input,
            conv0_w, conv0_b, buf0,
            CONV0_IN_CH, CONV0_IN_LEN,
@@ -175,7 +172,7 @@ int tiny_vad_infer(const int8_t *input, int8_t *logits)
            conv0_mult, conv0_rshift,
            /*relu=*/1);
 
-    /* Conv1 + ReLU  →  buf1 [64, 13] */
+    /* Conv1 + ReLU  →  buf1 [13, 64] */
     conv1d(buf0,
            conv1_w, conv1_b, buf1,
            CONV1_IN_CH, CONV1_IN_LEN,

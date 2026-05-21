@@ -81,7 +81,8 @@
  *
  * @param input   int8 array [TINYVAD_N_FRAMES * TINYVAD_N_MEL] = [49*40=1960]
  *                quantized with INPUT_SCALE / INPUT_ZP from tiny_vad_weights.h
- *                layout: row-major [frames][mels]
+ *                layout: row-major [frame][mel]  i.e. inp[frame*40 + mel]
+ *                This matches TFLite's NHWC [time, channel] convention.
  *
  * @param logits  output buffer int8[2]
  *                logits[0] = silence score,  logits[1] = speech score
