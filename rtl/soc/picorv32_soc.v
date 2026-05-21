@@ -9,11 +9,11 @@
 `default_nettype none
 
 module picorv32_soc #(
-    parameter ENABLE_MUL        = 1,
-    parameter ENABLE_FAST_MUL   = 1,
-    parameter ENABLE_DIV        = 0,
-    parameter ENABLE_COMPRESSED = 1,
-    parameter ENABLE_COUNTERS   = 1
+    parameter ENABLE_MUL      = 1,
+    parameter ENABLE_FAST_MUL = 1,
+    parameter ENABLE_DIV      = 0,
+    parameter COMPRESSED_ISA  = 1,
+    parameter ENABLE_COUNTERS = 1
 ) (
     input  wire        clk,
     input  wire        resetn,
@@ -51,7 +51,7 @@ picorv32 #(
     .ENABLE_MUL       (ENABLE_MUL),
     .ENABLE_FAST_MUL  (ENABLE_FAST_MUL),
     .ENABLE_DIV       (ENABLE_DIV),
-    .ENABLE_COMPRESSED(ENABLE_COMPRESSED),
+    .COMPRESSED_ISA   (COMPRESSED_ISA),
     .ENABLE_COUNTERS  (ENABLE_COUNTERS),
     .REGS_INIT_ZERO   (1)
 ) cpu (
