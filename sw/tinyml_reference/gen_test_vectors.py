@@ -85,14 +85,42 @@ if DATA_DIR.exists():
                 if len(silence_wavs) >= N_VECTORS // 2:
                     break
                 silence_wavs.append(wav[s:s + SAMPLE_RATE])
-else:
-    print("WARNING: speech_commands not found — using synthetic data")
+
+# Fallback: use whisper.cpp sample audio for speech vectors
+if len(speech_wavs) < N_VECTORS // 2:
+    samples_dir = ROOT / "whisper.cpp" / "samples"
+    for wav_path in sorted(samples_dir.glob("*.wav")):
+        try:
+            wav, sr = sf.read(str(wav_path), dtype="float32")
+            if wav.ndim > 1: wav = wav.mean(1)
+            # resample if needed (jfk.wav is 16kHz so should be fine)
+            if sr != SAMPLE_RATE:
+                print(f"  WARNING: {wav_path.name} is {sr}Hz, expected {SAMPLE_RATE}Hz — skipping")
+                continue
+            # chunk into 1-second pieces
+            for s in range(0, len(wav) - SAMPLE_RATE, SAMPLE_RATE):
+                if len(speech_wavs) >= N_VECTORS // 2:
+                    break
+                speech_wavs.append(wav[s:s + SAMPLE_RATE].copy())
+            if len(speech_wavs) >= N_VECTORS // 2:
+                break
+        except Exception as e:
+            print(f"  WARNING: could not load {wav_path}: {e}")
+    if speech_wavs:
+        print(f"Loaded {len(speech_wavs)} speech chunks from whisper.cpp/samples/")
+
+# Silence fallback: near-zero noise floor (not random — matches real mic noise)
+if len(silence_wavs) < N_VECTORS // 2:
+    rng = np.random.default_rng(42)
+    while len(silence_wavs) < N_VECTORS // 2:
+        silence_wavs.append((rng.standard_normal(SAMPLE_RATE) * 0.002).astype(np.float32))
+    print(f"Generated {N_VECTORS // 2} synthetic silence vectors (near-zero noise floor)")
+
+if len(speech_wavs) == 0:
+    print("WARNING: no speech audio found anywhere — test vectors will be meaningless")
+    rng = np.random.default_rng(0)
     for _ in range(N_VECTORS // 2):
-        # synthetic speech: random noise burst
-        speech_wavs.append(np.random.randn(SAMPLE_RATE).astype(np.float32) * 0.1)
-    for _ in range(N_VECTORS // 2):
-        # synthetic silence: near-zero noise
-        silence_wavs.append(np.random.randn(SAMPLE_RATE).astype(np.float32) * 0.001)
+        speech_wavs.append((rng.standard_normal(SAMPLE_RATE) * 0.05).astype(np.float32))
 
 speech_wavs  = speech_wavs[:N_VECTORS // 2]
 silence_wavs = silence_wavs[:N_VECTORS // 2]
