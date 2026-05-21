@@ -1,35 +1,24 @@
-/* picorv32_soc.v
+`timescale 1 ns / 1 ps
+/* picorv32_soc.v — minimal SoC wrapper exposing the CPU memory bus to Verilator.
  *
- * Minimal SoC wrapper around PicoRV32.
- * All memory and I/O are handled by the Verilator C++ testbench —
- * this module just exposes the CPU memory bus as top-level ports so
- * the testbench can intercept every access.
- *
- * Memory map (enforced by testbench, not this RTL):
- *   0x00000000 - 0x0003FFFF  RAM  256 KB  (code + data + stack)
- *   0x10000000               UART TX       (write = emit char)
- *   0x10000004               SIM_EXIT      (write = end simulation)
- *
- * Parameters you can tune for design-space exploration (Stage 5):
- *   ENABLE_MUL       1 = hardware multiplier (needed for int8 MAC)
- *   ENABLE_FAST_MUL  1 = single-cycle mul  (0 = shift-add, slower)
- *   ENABLE_COMPRESSED 1 = RV32C 16-bit insns (reduces code size)
- *   ENABLE_COUNTERS  1 = rdcycle CSR (needed for cycle measurement)
+ * All memory and I/O are handled by the C++ testbench (sim_main.cpp).
+ * Optional PicoRV32 interfaces (look-ahead bus, co-processor, IRQ, trace)
+ * are tied off here so they don't need to be wired in the testbench.
  */
 
 `default_nettype none
 
 module picorv32_soc #(
-    parameter ENABLE_MUL       = 1,
-    parameter ENABLE_FAST_MUL  = 1,
-    parameter ENABLE_DIV       = 0,
+    parameter ENABLE_MUL        = 1,
+    parameter ENABLE_FAST_MUL   = 1,
+    parameter ENABLE_DIV        = 0,
     parameter ENABLE_COMPRESSED = 1,
-    parameter ENABLE_COUNTERS  = 1
+    parameter ENABLE_COUNTERS   = 1
 ) (
     input  wire        clk,
     input  wire        resetn,
 
-    /* Memory bus — handled by C++ testbench */
+    /* Native memory bus — handled by C++ testbench */
     output wire        mem_valid,
     output wire        mem_instr,
     input  wire        mem_ready,
@@ -41,6 +30,23 @@ module picorv32_soc #(
     output wire        trap
 );
 
+/* Look-ahead memory interface outputs — unused, left open */
+wire        mem_la_read;
+wire        mem_la_write;
+wire [31:0] mem_la_addr;
+wire [31:0] mem_la_wdata;
+wire  [3:0] mem_la_wstrb;
+
+/* Co-processor interface — disabled (inputs tied low, outputs ignored) */
+wire        pcpi_valid;
+wire [31:0] pcpi_insn;
+wire [31:0] pcpi_rs1;
+wire [31:0] pcpi_rs2;
+
+/* Trace interface — unused */
+wire        trace_valid;
+wire [35:0] trace_data;
+
 picorv32 #(
     .ENABLE_MUL       (ENABLE_MUL),
     .ENABLE_FAST_MUL  (ENABLE_FAST_MUL),
@@ -49,16 +55,43 @@ picorv32 #(
     .ENABLE_COUNTERS  (ENABLE_COUNTERS),
     .REGS_INIT_ZERO   (1)
 ) cpu (
-    .clk      (clk),
-    .resetn   (resetn),
-    .trap     (trap),
-    .mem_valid(mem_valid),
-    .mem_instr(mem_instr),
-    .mem_ready(mem_ready),
-    .mem_addr (mem_addr),
-    .mem_wdata(mem_wdata),
-    .mem_wstrb(mem_wstrb),
-    .mem_rdata(mem_rdata)
+    .clk          (clk),
+    .resetn       (resetn),
+    .trap         (trap),
+
+    /* Main memory bus */
+    .mem_valid    (mem_valid),
+    .mem_instr    (mem_instr),
+    .mem_ready    (mem_ready),
+    .mem_addr     (mem_addr),
+    .mem_wdata    (mem_wdata),
+    .mem_wstrb    (mem_wstrb),
+    .mem_rdata    (mem_rdata),
+
+    /* Look-ahead bus — wired to local wires, ignored by testbench */
+    .mem_la_read  (mem_la_read),
+    .mem_la_write (mem_la_write),
+    .mem_la_addr  (mem_la_addr),
+    .mem_la_wdata (mem_la_wdata),
+    .mem_la_wstrb (mem_la_wstrb),
+
+    /* Co-processor — tied off (no external co-processor) */
+    .pcpi_valid   (pcpi_valid),
+    .pcpi_insn    (pcpi_insn),
+    .pcpi_rs1     (pcpi_rs1),
+    .pcpi_rs2     (pcpi_rs2),
+    .pcpi_wr      (1'b0),
+    .pcpi_rd      (32'b0),
+    .pcpi_wait    (1'b0),
+    .pcpi_ready   (1'b0),
+
+    /* Interrupts — all masked (no IRQ sources in simulation) */
+    .irq          (32'b0),
+    .eoi          (),
+
+    /* Trace — ignored */
+    .trace_valid  (trace_valid),
+    .trace_data   (trace_data)
 );
 
 endmodule
