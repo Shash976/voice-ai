@@ -12,7 +12,10 @@
 
 import numpy as np
 import soundfile as sf
-import tflite_runtime.interpreter as tflite
+try:
+    import tflite_runtime.interpreter as tflite
+except ImportError:
+    import tensorflow.lite as tflite
 import subprocess, time, tempfile, os, csv, datetime
 
 SAMPLE_RATE = 16000
@@ -64,7 +67,7 @@ _MEL_FB = _build_mel_fb()   # computed once at import time
 def extract_logmel(chunk):
     """Convert a 1-second float32 PCM chunk → [N_FRAMES, N_MEL] log-mel.
 
-    Pure numpy — no librosa/torch dependency.  Parameters match
+    Parameters match
     train_tiny_vad.py exactly (n_fft=512, win=400, hop=160, n_mels=40,
     fmin=80, fmax=7600, HTK mel scale, no filterbank normalization).
 
