@@ -15,12 +15,17 @@
 
 #include <stdint.h>
 #include "syscalls.h"
+#include "accel.h"
 #include "../tinyengine_port/tiny_vad_infer.h"
 #include "../tinyengine_port/tiny_vad_weights.h"
 #include "../tinyengine_port/tiny_vad_test_vectors.h"
 
 int main(void)
 {
+    /* Route conv1d and dense layers to the hardware accelerator */
+    tinyvad_conv1d_hook = accel_conv1d;
+    tinyvad_dense_hook  = accel_dense;
+
     uart_puts("vec,label,result,correct,logit0,logit1,cycles\n");
 
     int8_t  logits[2];

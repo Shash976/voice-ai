@@ -35,6 +35,7 @@ LDFLAGS = -T linker.ld -Wl,--gc-sections
 
 SRCS = startup.S \
        main.c \
+       accel.c \
        ../tinyengine_port/tiny_vad_infer.c
 
 OBJS = $(patsubst %.S,%.o,$(patsubst %.c,%.o,$(notdir $(SRCS))))
@@ -54,6 +55,9 @@ startup.o: startup.S
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 main.o: main.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+accel.o: accel.c accel.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 tiny_vad_infer.o: ../tinyengine_port/tiny_vad_infer.c

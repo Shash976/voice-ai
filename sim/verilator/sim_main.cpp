@@ -8,6 +8,7 @@
  *   0x00000000 - 0x0003FFFF  RAM 256 KB  (code + data + stack)
  *   0x10000000               UART TX     write byte → stdout
  *   0x10000004               SIM_EXIT    write → end simulation
+ *   0x20000000 - 0x20000FFF  TinyMAC accelerator registers (Stage 4)
  *
  * Usage:
  *   ./sim_picorv32 <firmware.bin> [--vcd <out.vcd>]
@@ -32,7 +33,12 @@
 #define RAM_SIZE       (256 * 1024)
 #define UART_ADDR      0x10000000u
 #define EXIT_ADDR      0x10000004u
-#define MAX_CYCLES     800000000ULL   /* 800M cycle timeout (64 vectors × ~11M cycles each) */
+#define MAX_CYCLES     50000000ULL    /* 50M cycle timeout (accelerated: ~35K cycles/vector) */
+
+/* Accelerator base address and number of parallel MAC lanes.
+ * Changing MAC_LANES models different hardware parallelism levels. */
+#define ACCEL_BASE     0x20000000u
+#define MAC_LANES      8             /* parallel int8 multiply-accumulate units */
 
 /* ── State ───────────────────────────────────────────────────────────────── */
 
@@ -40,6 +46,134 @@ static uint8_t  ram[RAM_SIZE];
 static bool     sim_done  = false;
 static int      exit_code = 0;
 static uint64_t cycle_count = 0;
+
+/* ── Accelerator emulation ───────────────────────────────────────────────── */
+
+static struct {
+    uint32_t in_ptr, wt_ptr, bias_ptr, mult_ptr, rshi_ptr, out_ptr;
+    uint32_t dim_m, dim_k;
+    uint32_t dim_kern, dim_inlen, dim_stride, dim_pad;
+    uint32_t zp_in, zp_out, relu;
+    uint32_t last_cyc;
+} ar;
+
+static uint64_t accel_done_at = 0;  /* simulation cycle when accel becomes idle */
+
+/* Mirrors tiny_vad_infer.c's requantize() exactly. */
+static int32_t accel_requantize(int32_t x, int32_t q_mult, int32_t rshift_val)
+{
+    int64_t val = (int64_t)q_mult * (int64_t)x;
+    val += (1LL << 30);
+    val >>= 31;
+    if (rshift_val > 0) {
+        val += (1LL << (rshift_val - 1));
+        val >>= rshift_val;
+    } else if (rshift_val < 0) {
+        val <<= (-rshift_val);
+    }
+    return (int32_t)val;
+}
+
+static int8_t accel_clamp(int32_t x)
+{
+    if (x >  127) return  127;
+    if (x < -128) return -128;
+    return (int8_t)x;
+}
+
+static void accel_execute(uint32_t cmd)
+{
+    const int8_t  *inp  = (const int8_t* )(ram + ar.in_ptr);
+    const int8_t  *wt   = (const int8_t* )(ram + ar.wt_ptr);
+    const int32_t *bias = (const int32_t*)(ram + ar.bias_ptr);
+    const int32_t *mult = (const int32_t*)(ram + ar.mult_ptr);
+    const int32_t *rshi = (const int32_t*)(ram + ar.rshi_ptr);
+    int8_t        *out  = (int8_t*        )(ram + ar.out_ptr);
+    int32_t in_zp  = (int32_t)ar.zp_in;
+    int32_t out_zp = (int32_t)ar.zp_out;
+    int     relu   = (int)ar.relu;
+    uint64_t total_macs = 0;
+
+    if (cmd == 1u) {
+        /* ── MATVEC (dense layer): out[M] = W[M][K] · in[K] ── */
+        uint32_t M = ar.dim_m, K = ar.dim_k;
+        for (uint32_t o = 0; o < M; o++) {
+            int32_t acc = bias[o];
+            for (uint32_t i = 0; i < K; i++) {
+                int32_t x  = (int32_t)inp[i] - in_zp;
+                int32_t wv = (int32_t)wt[o * K + i];
+                acc += x * wv;
+            }
+            int32_t r = accel_requantize(acc, mult[o], rshi[o]) + out_zp;
+            if (relu && r < out_zp) r = out_zp;
+            out[o] = accel_clamp(r);
+        }
+        total_macs = (uint64_t)M * K;
+
+    } else if (cmd == 2u) {
+        /* ── CONV1D: out[out_len][out_ch] ── */
+        uint32_t out_ch = ar.dim_m,  in_ch  = ar.dim_k;
+        uint32_t kern   = ar.dim_kern, inlen = ar.dim_inlen;
+        uint32_t stride = ar.dim_stride, pad = ar.dim_pad;
+        uint32_t out_len = (inlen + 2 * pad - kern) / stride + 1;
+
+        for (uint32_t t = 0; t < out_len; t++) {
+            for (uint32_t oc = 0; oc < out_ch; oc++) {
+                int32_t acc = bias[oc];
+                for (uint32_t ic = 0; ic < in_ch; ic++) {
+                    for (uint32_t k = 0; k < kern; k++) {
+                        int pos = (int)(t * stride + k) - (int)pad;
+                        if (pos >= 0 && pos < (int)inlen) {
+                            int32_t x  = (int32_t)inp[pos * in_ch + ic] - in_zp;
+                            int32_t wv = (int32_t)wt[(oc * in_ch + ic) * kern + k];
+                            acc += x * wv;
+                        }
+                    }
+                }
+                int32_t r = accel_requantize(acc, mult[oc], rshi[oc]) + out_zp;
+                if (relu && r < out_zp) r = out_zp;
+                out[t * out_ch + oc] = accel_clamp(r);
+            }
+        }
+        total_macs = (uint64_t)out_len * out_ch * in_ch * kern;
+    }
+
+    uint64_t latency = (total_macs + MAC_LANES - 1) / MAC_LANES;
+    ar.last_cyc  = (uint32_t)latency;
+    accel_done_at = cycle_count + latency;
+}
+
+static uint32_t accel_read(uint32_t offset)
+{
+    switch (offset) {
+    case 0x00: return (cycle_count < accel_done_at) ? 1u : 0u;  /* STATUS */
+    case 0x44: return ar.last_cyc;                                /* LAST_CYC */
+    default:   return 0u;
+    }
+}
+
+static void accel_write(uint32_t offset, uint32_t val)
+{
+    switch (offset) {
+    case 0x04: accel_execute(val); break;  /* CMD — triggers operation */
+    case 0x08: ar.in_ptr    = val; break;
+    case 0x0C: ar.wt_ptr    = val; break;
+    case 0x10: ar.bias_ptr  = val; break;
+    case 0x14: ar.mult_ptr  = val; break;
+    case 0x18: ar.rshi_ptr  = val; break;
+    case 0x1C: ar.out_ptr   = val; break;
+    case 0x20: ar.dim_m     = val; break;
+    case 0x24: ar.dim_k     = val; break;
+    case 0x28: ar.dim_kern  = val; break;
+    case 0x2C: ar.dim_inlen = val; break;
+    case 0x30: ar.dim_stride = val; break;
+    case 0x34: ar.dim_pad   = val; break;
+    case 0x38: ar.zp_in     = val; break;
+    case 0x3C: ar.zp_out    = val; break;
+    case 0x40: ar.relu      = val; break;
+    default: break;
+    }
+}
 
 /* ── Firmware loader ─────────────────────────────────────────────────────── */
 
@@ -65,6 +199,8 @@ static uint32_t mem_read(uint32_t addr)
         memcpy(&v, &ram[addr], 4);
         return v;
     }
+    if (addr >= ACCEL_BASE && addr < ACCEL_BASE + 0x1000u)
+        return accel_read(addr - ACCEL_BASE);
     /* Unmapped reads return 0 (UART status = always ready) */
     return 0u;
 }
@@ -75,6 +211,13 @@ static void mem_write(uint32_t addr, uint32_t data, uint8_t strb)
         for (int i = 0; i < 4; i++)
             if (strb & (1u << i))
                 ram[addr + i] = (uint8_t)(data >> (8 * i));
+        return;
+    }
+
+    if (addr >= ACCEL_BASE && addr < ACCEL_BASE + 0x1000u) {
+        /* Accelerator registers are 32-bit word writes (strb=0xF) */
+        if (strb == 0xF)
+            accel_write(addr - ACCEL_BASE, data);
         return;
     }
 

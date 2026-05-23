@@ -72,6 +72,28 @@
 #define TINYVAD_BUF2_SIZE  (POOL_CH)                         /* 64       */
 #define TINYVAD_BUF3_SIZE  (FC0_OUT)                         /* 32       */
 
+/* ── Optional hardware-acceleration hooks ────────────────────────────────────
+ *
+ * Set these to non-NULL before calling tiny_vad_infer() to redirect conv1d
+ * and dense layers to hardware.  Default NULL → pure-software fallback.
+ *
+ * Signatures match the internal static functions in tiny_vad_infer.c exactly.
+ */
+
+typedef void (*tinyvad_conv1d_fn)(
+    const int8_t *inp, const int8_t *w, const int32_t *b, int8_t *out,
+    int in_ch, int in_len, int out_ch, int out_len,
+    int kernel, int stride, int pad, int in_zp, int out_zp,
+    const int32_t *q_mult, const int32_t *rshift, int relu);
+
+typedef void (*tinyvad_dense_fn)(
+    const int8_t *inp, const int8_t *w, const int32_t *b, int8_t *out,
+    int in, int out_dim, int in_zp, int out_zp,
+    const int32_t *q_mult, const int32_t *rshift, int relu);
+
+extern tinyvad_conv1d_fn tinyvad_conv1d_hook;
+extern tinyvad_dense_fn  tinyvad_dense_hook;
+
 /* ── Public API ─────────────────────────────────────────────────────────────── */
 
 /*
