@@ -31,7 +31,7 @@ CFLAGS = \
     -I. \
     -I../tinyengine_port
 
-LDFLAGS = -T linker.ld -Wl,--gc-sections -Wl,--no-dynamic-linker
+LDFLAGS = -T linker.ld -Wl,--gc-sections
 
 SRCS = startup.S \
        main.c \
