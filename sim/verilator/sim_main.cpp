@@ -32,7 +32,7 @@
 #define RAM_SIZE       (256 * 1024)
 #define UART_ADDR      0x10000000u
 #define EXIT_ADDR      0x10000004u
-#define MAX_CYCLES     100000000ULL   /* 100M cycle timeout */
+#define MAX_CYCLES     600000000ULL   /* 600M cycle timeout (42 vectors × ~11M cycles each) */
 
 /* ── State ───────────────────────────────────────────────────────────────── */
 
