@@ -7,6 +7,8 @@
  * test vectors (~82 KB) + code + stack.
  */
 
+ENTRY(_start)
+
 MEMORY {
     RAM (rwx) : ORIGIN = 0x00000000, LENGTH = 256K
 }
@@ -14,9 +16,9 @@ MEMORY {
 SECTIONS {
     /* Reset vector must be at address 0 */
     .text 0x00000000 : {
-        *(.text.start)      /* startup.S _start label */
+        KEEP(*(.text.start))    /* startup.S _start — never gc'd */
         *(.text*)
-        *(.rodata*)         /* const arrays: weights, test vectors */
+        *(.rodata*)             /* const arrays: weights, test vectors */
     } > RAM
 
     .data : {
