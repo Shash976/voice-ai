@@ -25,13 +25,15 @@ CFLAGS = \
     -ffreestanding \
     -nostdlib \
     -fno-builtin \
+    -fno-pic \
+    -fno-pie \
     -ffunction-sections \
     -fdata-sections \
     -Wall \
     -I. \
     -I../tinyengine_port
 
-LDFLAGS = -T linker.ld -Wl,--gc-sections
+LDFLAGS = -T linker.ld -Wl,--gc-sections -no-pie -Wl,--build-id=none
 
 SRCS = startup.S \
        main.c \

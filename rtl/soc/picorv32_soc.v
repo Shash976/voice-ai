@@ -11,7 +11,7 @@
 module picorv32_soc #(
     parameter ENABLE_MUL      = 1,
     parameter ENABLE_FAST_MUL = 1,
-    parameter ENABLE_DIV      = 0,
+    parameter ENABLE_DIV      = 1,
     parameter COMPRESSED_ISA  = 1,
     parameter ENABLE_COUNTERS = 1
 ) (

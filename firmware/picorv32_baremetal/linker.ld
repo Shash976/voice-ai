@@ -3,18 +3,12 @@
  * Single flat address space: code, data, and stack all in RAM.
  * PicoRV32 resets to address 0x00000000, so .text.start goes first.
  *
- * PHDRS is declared explicitly so the riscv64-linux-gnu linker does not
- * auto-insert a PT_PHDR entry that cannot be placed before address 0.
+ * 256 KB is plenty for TinyVAD weights (~16 KB) +
+ * test vectors (~82 KB) + code + stack.
  */
-
-ENTRY(_start)
 
 MEMORY {
     RAM (rwx) : ORIGIN = 0x00000000, LENGTH = 256K
-}
-
-PHDRS {
-    ram PT_LOAD FLAGS(7);   /* R + W + X — single LOAD segment covers everything */
 }
 
 SECTIONS {
@@ -23,12 +17,12 @@ SECTIONS {
         *(.text.start)      /* startup.S _start label */
         *(.text*)
         *(.rodata*)         /* const arrays: weights, test vectors */
-    } > RAM :ram
+    } > RAM
 
     .data : {
         *(.data*)
         *(.sdata*)
-    } > RAM :ram
+    } > RAM
 
     .bss : {
         _bss_start = .;
@@ -36,7 +30,7 @@ SECTIONS {
         *(.sbss*)
         *(COMMON)
         _bss_end = .;
-    } > RAM :ram
+    } > RAM
 
     /* Stack grows DOWN from the top of RAM */
     _stack_top = ORIGIN(RAM) + LENGTH(RAM);
