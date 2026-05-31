@@ -11,7 +11,7 @@
  *   0x20000000 - 0x20000FFF  TinyMAC accelerator registers (Stage 4)
  *
  * Usage:
- *   ./sim_picorv32 <firmware.bin> [--vcd <out.vcd>]
+ *   ./sim_picorv32 <firmware.bin> [--vcd <out.vcd>] [--mac-lanes N]
  *
  * Output:
  *   CSV printed to stdout (from firmware UART)
@@ -35,10 +35,8 @@
 #define EXIT_ADDR      0x10000004u
 #define MAX_CYCLES     50000000ULL    /* 50M cycle timeout (accelerated: ~35K cycles/vector) */
 
-/* Accelerator base address and number of parallel MAC lanes.
- * Changing MAC_LANES models different hardware parallelism levels. */
+/* Accelerator base address. MAC lanes are set at runtime via --mac-lanes N. */
 #define ACCEL_BASE     0x20000000u
-#define MAC_LANES      8             /* parallel int8 multiply-accumulate units */
 
 /* ── State ───────────────────────────────────────────────────────────────── */
 
@@ -46,6 +44,7 @@ static uint8_t  ram[RAM_SIZE];
 static bool     sim_done  = false;
 static int      exit_code = 0;
 static uint64_t cycle_count = 0;
+static int      mac_lanes = 8;   /* set by --mac-lanes at startup */
 
 /* ── Accelerator emulation ───────────────────────────────────────────────── */
 
@@ -158,7 +157,7 @@ static void accel_execute(uint32_t cmd)
         total_macs = (uint64_t)out_len * out_ch * in_ch * kern;
     }
 
-    uint64_t latency = (total_macs + MAC_LANES - 1) / MAC_LANES;
+    uint64_t latency = (total_macs + (uint64_t)mac_lanes - 1) / (uint64_t)mac_lanes;
     ar.last_cyc   = (uint32_t)latency;
     accel_done_at = cycle_count + latency;
 }
@@ -269,15 +268,19 @@ int main(int argc, char **argv)
 {
     /* Parse arguments */
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <firmware.bin> [--vcd <out.vcd>]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <firmware.bin> [--vcd <out.vcd>] [--mac-lanes N]\n", argv[0]);
         return 1;
     }
     const char *fw_path  = argv[1];
     const char *vcd_path = nullptr;
-    for (int i = 2; i < argc - 1; i++) {
-        if (std::string(argv[i]) == "--vcd")
-            vcd_path = argv[i + 1];
+    for (int i = 2; i < argc; i++) {
+        if (std::string(argv[i]) == "--vcd" && i + 1 < argc)
+            vcd_path = argv[++i];
+        else if (std::string(argv[i]) == "--mac-lanes" && i + 1 < argc)
+            mac_lanes = std::atoi(argv[++i]);
     }
+    if (mac_lanes < 1) mac_lanes = 1;
+    fprintf(stderr, "[sim] mac_lanes=%d\n", mac_lanes);
 
     load_firmware(fw_path);
 
@@ -354,9 +357,10 @@ int main(int argc, char **argv)
         fprintf(stderr, "[sim] TIMEOUT after %llu cycles\n",
                 (unsigned long long)cycle_count);
     else
-        fprintf(stderr, "[sim] Done in %llu cycles (wall: ~%.1f ms at 100 MHz)\n",
+        fprintf(stderr, "[sim] Done in %llu cycles (wall: ~%.1f ms at 100 MHz) mac_lanes=%d\n",
                 (unsigned long long)cycle_count,
-                (double)cycle_count / 100000.0);
+                (double)cycle_count / 100000.0,
+                mac_lanes);
 
     if (vcd) { vcd->close(); delete vcd; }
     delete top;
