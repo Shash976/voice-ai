@@ -323,8 +323,10 @@ def make_pareto(df: pd.DataFrame, best_ml: int) -> go.Figure:
             size=df["speedup"] * 2,
             color=df["reward"],
             colorscale="RdYlGn",
-            colorbar=dict(title="Reward", tickfont=dict(color="#7090b0"),
-                          titlefont=dict(color="#7090b0")),
+            colorbar=dict(
+                title=dict(text="Reward", font=dict(color="#7090b0")),
+                tickfont=dict(color="#7090b0"),
+            ),
             line=dict(color="white", width=0.5),
         ),
         text=[f"Trial {t}<br>lanes={ml}<br>{cyc:,} cycles<br>{sp:.1f}× speedup"
