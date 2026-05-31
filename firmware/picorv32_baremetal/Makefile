@@ -13,10 +13,11 @@
 #   make disasm      dump disassembly (check for illegal FP instructions)
 #   make clean
 
-CC      = riscv64-linux-gnu-gcc
-OBJCOPY = riscv64-linux-gnu-objcopy
-OBJDUMP = riscv64-linux-gnu-objdump
-SIZE    = riscv64-linux-gnu-size
+CROSS   ?= riscv64-linux-gnu
+CC      = $(CROSS)-gcc
+OBJCOPY = $(CROSS)-objcopy
+OBJDUMP = $(CROSS)-objdump
+SIZE    = $(CROSS)-size
 
 CFLAGS = \
     -march=rv32imc \

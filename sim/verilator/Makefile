@@ -11,6 +11,8 @@
 #   make vcd          run with VCD waveform dump → sim_out.vcd  (open in GTKWave)
 #   make clean
 
+CROSS        ?= riscv64-linux-gnu
+
 REPO_ROOT    = ../..
 PICORV32_V   = $(REPO_ROOT)/rtl/picorv32/picorv32.v
 SOC_V        = $(REPO_ROOT)/rtl/soc/picorv32_soc.v
@@ -37,8 +39,8 @@ all: $(SIM_BIN)
 # ── Check prerequisites ──────────────────────────────────────────────────────
 
 check-deps:
-	@which verilator > /dev/null 2>&1 || (echo "ERROR: verilator not found. Run: sudo apt install verilator" && exit 1)
-	@which riscv64-linux-gnu-gcc > /dev/null 2>&1 || (echo "ERROR: riscv64-linux-gnu-gcc not found. Run: sudo apt install gcc-riscv64-linux-gnu" && exit 1)
+	@which verilator > /dev/null 2>&1 || (echo "ERROR: verilator not found. Build from source: https://github.com/verilator/verilator" && exit 1)
+	@(which riscv64-linux-gnu-gcc || which riscv-none-elf-gcc) > /dev/null 2>&1 || (echo "ERROR: no riscv gcc found. Download xPack: https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack/releases" && exit 1)
 	@test -f $(PICORV32_V) || (echo "ERROR: $(PICORV32_V) not found. Run: bash scripts/setup_picorv32.sh" && exit 1)
 	@test -f $(REPO_ROOT)/firmware/tinyengine_port/tiny_vad_weights.h || (echo "ERROR: tiny_vad_weights.h missing. Run: python sw/tinyml_reference/export_weights.py" && exit 1)
 	@test -f $(REPO_ROOT)/firmware/tinyengine_port/tiny_vad_test_vectors.h || (echo "ERROR: tiny_vad_test_vectors.h missing. Run: python sw/tinyml_reference/gen_test_vectors.py" && exit 1)
@@ -56,7 +58,7 @@ $(SIM_BIN): $(SOC_V) $(PICORV32_V) sim_main.cpp
 # ── Build firmware ───────────────────────────────────────────────────────────
 
 firmware:
-	$(MAKE) -C $(FIRMWARE_DIR)
+	$(MAKE) -C $(FIRMWARE_DIR) CROSS=$(CROSS)
 
 # ── Run ─────────────────────────────────────────────────────────────────────
 
