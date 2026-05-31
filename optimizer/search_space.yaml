@@ -1,0 +1,99 @@
+# search_space.yaml — TinyMAC accelerator design-space optimizer
+#
+# sim_params:   fed directly to the Verilator sim binary as CLI flags.
+#               The sim evaluates these precisely (cycle-accurate simulation).
+#
+# proxy_params: evaluated via analytical proxy models without a sim run.
+#               These become real once ORFS RTL synthesis is wired up (Stage 6).
+#
+# reward:       weights for the multi-objective reward formula.
+
+sim_params:
+  mac_lanes:
+    type: categorical
+    choices: [1, 2, 4, 8, 16]
+    default: 8
+    flag: "--mac-lanes"
+    description: "Number of parallel int8 MAC units in the accelerator array"
+
+proxy_params:
+  accumulator_width:
+    type: categorical
+    choices: [16, 24, 32]
+    default: 32
+    description: >
+      Bit width of the int32 accumulator.
+      TinyVAD worst-case: Conv0 has K=200 inputs, max acc = 200*127*127 = 3,226,600.
+      int16 max = 32,767    → ALWAYS overflows (heavy correctness penalty).
+      int24 max = 8,388,607 → safe for all TinyVAD layers.
+      int32 max = 2,147,483,647 → fully safe.
+    # Pre-computed for TinyVAD (Conv0 dominates: kernel=5, in_ch=40, out_ch=32)
+    tinyvad_max_accumulator: 3226600
+
+  input_buffer_bytes:
+    type: categorical
+    choices: [256, 512, 1024, 2048, 4096]
+    default: 1024
+    description: "On-chip input feature buffer size (bytes). Larger = more area/power."
+
+  weight_buffer_bytes:
+    type: categorical
+    choices: [256, 512, 1024, 2048, 4096]
+    default: 1024
+    description: "On-chip weight buffer size (bytes). Larger = more area/power."
+
+  dataflow:
+    type: categorical
+    choices: [output_stationary, weight_stationary]
+    default: output_stationary
+    description: >
+      Dataflow strategy (proxy only until RTL is written).
+      output_stationary: accumulate into output register, stream inputs+weights.
+      weight_stationary: hold weights, stream inputs. Better for batch inference.
+
+  clock_period_ns:
+    type: categorical
+    choices: [5, 10, 20]
+    default: 10
+    description: "Target clock period in ns for ORFS physical design constraints."
+
+# ── Proxy model calibration ──────────────────────────────────────────────────
+# These constants are calibrated for ASAP7 7nm-class estimates.
+# Sources: published TinyML accelerator papers, ORFS ASAP7 reference designs.
+
+proxy_model:
+  # Critical path (ns): base + routing_per_lane * mac_lanes + acc_per_byte * (acc_width/8)
+  # Empirically: a 1-lane int32 adder tree ≈ 2.5 ns in ASAP7; each extra lane adds routing.
+  critical_path_base_ns: 2.0
+  critical_path_per_lane_ns: 0.12
+  critical_path_per_acc_byte_ns: 0.05
+
+  # Area (relative units, normalized to baseline: mac_lanes=8, acc_width=32, buf=1024B each)
+  # Baseline MAC array area = 1.0; buffers add ~25% on top.
+  # area = (mac_lanes * acc_width) / (8 * 32)  +  buf_fraction * buf_weight
+  buf_area_weight: 0.25   # buffers are ~25% of baseline total area
+  baseline_buf_bytes: 2048  # in_buf + wt_buf at baseline
+
+  # Power: dynamic switching power ∝ area × clock_frequency
+  baseline_clock_mhz: 100.0   # baseline at 10 ns clock period
+
+# ── Reward function ──────────────────────────────────────────────────────────
+# Formula (from Stage 5 plan):
+#   reward = w_accuracy  * accuracy
+#          + w_speedup   * clipped_normalized_speedup
+#          + w_area      * area_proxy          (negative → penalizes large area)
+#          + w_power     * power_proxy         (negative → penalizes high power)
+#          + w_timing    * timing_violation    (negative → penalizes timing failures)
+#          + w_sim_cost  * normalized_runtime  (negative → penalizes slow sims)
+#          + correctness_penalty (if accuracy < 1 or accumulator overflows)
+
+reward:
+  w_accuracy: 2.0
+  w_speedup: 1.5
+  w_area: -1.0
+  w_power: -1.0
+  w_timing_violation: -3.0
+  w_sim_cost: -0.5
+  # Normalization denominators
+  max_speedup: 200.0      # expected max at 16 lanes; caps the speedup term
+  max_sim_time_s: 120.0   # normalizes sim wall-clock cost
