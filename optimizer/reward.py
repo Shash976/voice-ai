@@ -104,20 +104,37 @@ def compute_reward(
     """
     Compute multi-objective reward (higher is better).
 
-    sim_metrics keys:   accuracy, speedup
-    proxy_metrics keys: area_proxy, power_proxy, timing_violation, acc_overflow
-    elapsed_s:          wall-clock seconds the sim took
-    weights:            override reward weights (default = search_space.yaml values)
+    Speedup normalization uses log2 scale so the term is meaningful across
+    the full observed range (0.6× to 200×) rather than being crushed to ~0
+    when divided by 200 linearly.
+
+      log2(speedup) / log2(max_speedup)
+        speedup=0.6  → −0.10  (negative: slower than SW)
+        speedup=1.0  →  0.00  (break-even with SW)
+        speedup=4.0  →  0.27
+        speedup=16   →  0.53
+        speedup=191  →  0.99
+
+    Hard performance floor: if speedup < min_useful_speedup the accelerator
+    adds overhead without benefit — apply a large fixed penalty so the agent
+    stops exploring that region quickly.
+
+    Area and power are secondary objectives (lower weight) — the primary goal
+    is to maximise speedup; area/power trade off against each other after that.
     """
+    import math
+
     w = weights or {}
-    w_acc   = w.get("w_accuracy",         2.0)
-    w_spd   = w.get("w_speedup",          1.5)
-    w_area  = w.get("w_area",            -1.0)
-    w_pwr   = w.get("w_power",           -1.0)
-    w_tv    = w.get("w_timing_violation", -3.0)
-    w_cost  = w.get("w_sim_cost",        -0.5)
-    max_spd = w.get("max_speedup",       200.0)
-    max_sec = w.get("max_sim_time_s",    120.0)
+    w_acc     = w.get("w_accuracy",          2.0)
+    w_spd     = w.get("w_speedup",           3.0)   # primary perf objective
+    w_area    = w.get("w_area",             -0.4)   # secondary
+    w_pwr     = w.get("w_power",            -0.4)   # secondary
+    w_tv      = w.get("w_timing_violation", -3.0)
+    w_cost    = w.get("w_sim_cost",         -0.1)
+    max_spd   = w.get("max_speedup",        200.0)
+    min_spd   = w.get("min_useful_speedup",   1.5)  # below this = useless accel
+    perf_pen  = w.get("perf_floor_penalty",  -8.0)  # applied when speedup < min_spd
+    max_sec   = w.get("max_sim_time_s",     120.0)
 
     accuracy = sim_metrics["accuracy"]
     speedup  = sim_metrics["speedup"]
@@ -126,20 +143,32 @@ def compute_reward(
     t_viol   = 1.0 if proxy_metrics["timing_violation"] else 0.0
     overflow = proxy_metrics.get("acc_overflow", False)
 
-    # Hard correctness penalty (dominates reward when active)
+    # Log2-scale speedup: maps [1, max_spd] → [0, 1]; values <1 go negative.
+    # Clamp to [-1, 1] to bound the contribution.
+    if speedup > 0 and max_spd > 1:
+        norm_spd = math.log2(max(speedup, 1e-3)) / math.log2(max_spd)
+        norm_spd = max(-1.0, min(1.0, norm_spd))
+    else:
+        norm_spd = -1.0
+
+    # Hard floor: accelerator must beat SW baseline by at least min_useful_speedup
+    floor_penalty = perf_pen if speedup < min_spd else 0.0
+
+    # Hard correctness penalties
     correctness = 0.0
     if accuracy < 1.0:
         correctness -= 50.0 * (1.0 - accuracy)
     if overflow:
-        correctness -= 50.0
+        correctness -= 50.0   # int16 always overflows TinyVAD — fatal
 
     r = (
-        w_acc  * accuracy
-        + w_spd  * min(speedup / max_spd, 1.0)
+          w_acc  * accuracy
+        + w_spd  * norm_spd
         + w_area * area
         + w_pwr  * power
         + w_tv   * t_viol
         + w_cost * min(elapsed_s / max_sec, 1.0)
         + correctness
+        + floor_penalty
     )
     return round(r, 4)

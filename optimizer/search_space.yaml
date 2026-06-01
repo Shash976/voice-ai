@@ -88,12 +88,18 @@ proxy_model:
 #          + correctness_penalty (if accuracy < 1 or accumulator overflows)
 
 reward:
+  # Speedup is the primary objective — weight it 3× relative to accuracy term.
+  # Area and power are secondary (0.4 each); they trade off after speedup is good.
+  # Speedup uses log2 normalization so it is meaningful across the full observed
+  # range (0.6× to 200×); dividing linearly by 200 crushed the term to ~0.
   w_accuracy: 2.0
-  w_speedup: 1.5
-  w_area: -1.0
-  w_power: -1.0
+  w_speedup: 3.0
+  w_area: -0.4
+  w_power: -0.4
   w_timing_violation: -3.0
-  w_sim_cost: -0.5
-  # Normalization denominators
-  max_speedup: 200.0      # expected max at 16 lanes; caps the speedup term
-  max_sim_time_s: 120.0   # normalizes sim wall-clock cost
+  w_sim_cost: -0.1
+  # Normalisation / floor parameters
+  max_speedup: 200.0          # log2(max_speedup) is the denominator for speedup term
+  min_useful_speedup: 1.5     # below this threshold the accel adds overhead — hard penalty
+  perf_floor_penalty: -8.0    # applied when speedup < min_useful_speedup
+  max_sim_time_s: 120.0

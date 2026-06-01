@@ -667,12 +667,13 @@ def make_parallel_coords(df: pd.DataFrame) -> go.Figure:
     def _dim(col, label, tick_vals=None, tick_text=None):
         if col not in df.columns:
             return None
-        d = dict(label=label, values=df[col].tolist(),
-                 tickfont=dict(color="#88aacc", size=9),
-                 labelstyle=dict(color="#aaccdd", size=10))
+        # Only use properties valid for go.parcoords.Dimension:
+        # label, values, tickvals, ticktext, tickformat, range, visible, constraintrange
+        # NOTE: tickfont and labelstyle are NOT valid — they live on go.Parcoords, not Dimension
+        d = dict(label=label, values=df[col].tolist())
         if tick_vals:
-            d["tickvals"]  = tick_vals
-            d["ticktext"]  = tick_text or [str(v) for v in tick_vals]
+            d["tickvals"] = tick_vals
+            d["ticktext"] = tick_text or [str(v) for v in tick_vals]
         return d
 
     dfc = df.copy()
