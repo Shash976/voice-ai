@@ -44,7 +44,7 @@ import streamlit as st
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 RESULTS_FILE = Path(__file__).parent / "results.jsonl"
-SW_BASELINE  = 175_324   # Stage 3 pure-SW avg cycles/inference (no accel)
+SW_BASELINE  = 11_196_638   # Stage 3 pure-SW avg cycles/inference (measured 2026-06-01)
 REFRESH_SEC  = 2
 
 # Colour palette (dark chip-design aesthetic)
@@ -609,51 +609,139 @@ def make_trial_strip(df: pd.DataFrame) -> go.Figure:
 
 # ── Pareto frontier ───────────────────────────────────────────────────────────
 
+def _pareto_front(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return only non-dominated rows.
+
+    Objectives: maximise speedup (↑), minimise area_proxy (↓).
+    Row A dominates row B iff A.speedup ≥ B.speedup AND A.area ≤ B.area
+    with at least one strict inequality.  Only correct/non-overflowing configs
+    are eligible.
+    """
+    if df.empty:
+        return df
+
+    area_col  = "area_proxy"  if "area_proxy"  in df.columns else None
+    overflow_col = "acc_overflow" if "acc_overflow" in df.columns else None
+
+    # Only correct configs can be Pareto-optimal
+    cands = df[df["accuracy"] >= 1.0].copy() if "accuracy" in df.columns else df.copy()
+    if overflow_col:
+        cands = cands[cands[overflow_col] != True]
+    if cands.empty:
+        return cands
+
+    if area_col is None:
+        # No area column — return configs with highest speedup only
+        return cands[cands["speedup"] == cands["speedup"].max()]
+
+    front_idx = []
+    speedups = cands["speedup"].values
+    areas    = cands[area_col].values
+    indices  = cands.index.tolist()
+
+    for i, idx in enumerate(indices):
+        dominated = False
+        for j in range(len(indices)):
+            if i == j:
+                continue
+            # j dominates i?
+            if (speedups[j] >= speedups[i] and areas[j] <= areas[i] and
+                    (speedups[j] > speedups[i] or areas[j] < areas[i])):
+                dominated = True
+                break
+        if not dominated:
+            front_idx.append(idx)
+
+    return cands.loc[front_idx].sort_values("speedup")
+
+
 def make_pareto(df: pd.DataFrame) -> go.Figure:
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df["mac_lanes"], y=df["avg_cycles"], mode="markers",
-        marker=dict(
-            size=df["speedup"] * 1.6,
-            color=df["reward"], colorscale="RdYlGn",
-            colorbar=dict(title=dict(text="Reward", font=dict(color="#6a8aaa")),
-                          tickfont=dict(color="#6a8aaa")),
-            line=dict(color="white", width=0.5),
-        ),
-        text=[
+    """
+    Scatter of all trials with the true Pareto-optimal front highlighted.
+
+    The front is computed by non-domination filtering on (speedup ↑, area ↓).
+    Dominated trials are shown as faded grey circles; frontier configs as
+    bright circles connected by a step line.  The SW baseline is a reference
+    dashed line.
+    """
+    front = _pareto_front(df)
+    dominated = df.drop(index=front.index, errors="ignore")
+
+    def _hover(row_df):
+        return [
             f"Trial {t}<br>lanes={ml}  acc={aw}b  clk={clk}ns<br>"
-            f"{cyc:,} cycles  {sp:.1f}× speedup<br>area={ar:.2f}  slack={sl:+.1f}ns"
-            for t, ml, aw, clk, cyc, sp, ar, sl in zip(
-                df["trial"], df["mac_lanes"],
-                df.get("accumulator_width",  pd.Series([32]*len(df))),
-                df.get("clock_period_ns",    pd.Series([10]*len(df))),
-                df["avg_cycles"], df["speedup"],
-                df.get("area_proxy",         pd.Series([1.0]*len(df))),
-                df.get("timing_slack_ns",    pd.Series([5.0]*len(df))),
+            f"{cyc:,} cycles  {sp:.1f}× speedup<br>"
+            f"area={ar:.2f}  slack={sl:+.1f}ns  reward={rw:.3f}"
+            for t, ml, aw, clk, cyc, sp, ar, sl, rw in zip(
+                row_df["trial"], row_df["mac_lanes"],
+                row_df.get("accumulator_width",  pd.Series([32]  * len(row_df))),
+                row_df.get("clock_period_ns",    pd.Series([10]  * len(row_df))),
+                row_df["avg_cycles"], row_df["speedup"],
+                row_df.get("area_proxy",         pd.Series([1.0] * len(row_df))),
+                row_df.get("timing_slack_ns",    pd.Series([5.0] * len(row_df))),
+                row_df["reward"],
             )
-        ],
-        hovertemplate="%{text}<extra></extra>", name="Trials",
-    ))
+        ]
+
+    fig = go.Figure()
+
+    # Dominated configs — faded background
+    if not dominated.empty:
+        fig.add_trace(go.Scatter(
+            x=dominated["mac_lanes"], y=dominated["avg_cycles"],
+            mode="markers", name="Dominated",
+            marker=dict(size=8, color="rgba(80,100,120,0.35)",
+                        line=dict(color="rgba(120,140,160,0.3)", width=0.5)),
+            text=_hover(dominated),
+            hovertemplate="%{text}<extra></extra>",
+        ))
+
+    # Pareto-optimal configs — bright + step line
+    if not front.empty:
+        fig.add_trace(go.Scatter(
+            x=front["mac_lanes"], y=front["avg_cycles"],
+            mode="markers+lines", name="Pareto front",
+            line=dict(color=C_CYAN, width=1.5, dash="dot", shape="hv"),
+            marker=dict(
+                size=front["speedup"] * 2.2,
+                color=front["reward"], colorscale="RdYlGn",
+                colorbar=dict(title=dict(text="Reward", font=dict(color="#6a8aaa")),
+                              tickfont=dict(color="#6a8aaa")),
+                line=dict(color="white", width=1.2),
+            ),
+            text=_hover(front),
+            hovertemplate="%{text}<extra></extra>",
+        ))
+        # Gold star on highest-reward Pareto config
+        best = front.loc[front["reward"].idxmax()]
+        fig.add_trace(go.Scatter(
+            x=[best["mac_lanes"]], y=[best["avg_cycles"]], mode="markers",
+            marker=dict(symbol="star", size=22, color=C_GOLD,
+                        line=dict(color="black", width=1)),
+            name="Best on front", showlegend=False,
+        ))
+
     fig.add_hline(y=SW_BASELINE, line_dash="dash", line_color="#334455",
                   annotation_text=" SW baseline (no accel)",
                   annotation_font_color="#556677",
                   annotation_position="top right")
-    best = df.loc[df["reward"].idxmax()]
-    fig.add_trace(go.Scatter(
-        x=[best["mac_lanes"]], y=[best["avg_cycles"]], mode="markers",
-        marker=dict(symbol="star", size=22, color=C_GOLD,
-                    line=dict(color="black", width=1)),
-        name="Best", showlegend=False,
-    ))
+
+    n_front = len(front)
+    n_all   = len(df)
     fig.update_layout(
         plot_bgcolor=BG_DEEP, paper_bgcolor=BG_PANEL,
-        margin=dict(t=44, b=30, l=50, r=10), height=340,
-        title=dict(text="<b>Pareto Frontier</b>  ·  latency vs area",
-                   font=dict(color=C_CYAN, size=13), x=0.5),
-        xaxis=dict(title="MAC lanes (area proxy →)", color="#6a8aaa",
-                   gridcolor=GRID_CLR, tickvals=[1,2,4,8,16]),
+        margin=dict(t=44, b=30, l=50, r=10), height=360,
+        title=dict(
+            text=(f"<b>Pareto Frontier</b>  ·  speedup ↑  vs  area ↓"
+                  f"  ·  {n_front} / {n_all} configs non-dominated"),
+            font=dict(color=C_CYAN, size=13), x=0.5,
+        ),
+        xaxis=dict(title="MAC lanes  (area proxy →)", color="#6a8aaa",
+                   gridcolor=GRID_CLR, tickvals=[1, 2, 4, 8, 16]),
         yaxis=dict(title="Avg cycles / inference  (↓ better)",
                    color="#6a8aaa", gridcolor=GRID_CLR),
+        legend=dict(font=dict(color="#99bbcc"), bgcolor="rgba(0,0,0,0)"),
         font=dict(color="#99bbcc"),
     )
     return fig

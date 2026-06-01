@@ -27,6 +27,14 @@ class BaseAgent(ABC):
     def update(self, config: dict, reward: float, info: dict) -> None:
         """Called after OptEnv.step() completes. Override to update internal policy."""
 
+    def warm_start(self, history: list[dict]) -> None:
+        """
+        Replay previously observed (config, reward) pairs into the agent's
+        internal state.  Called when --resume loads an existing results file
+        so the agent continues learning from where it left off rather than
+        starting cold.  Default: no-op (stateless agents don't need it).
+        """
+
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def random_config(self) -> dict:

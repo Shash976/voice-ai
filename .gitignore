@@ -1,3 +1,24 @@
 whisper.cpp/
 venv/
 speech_commands/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Optimizer runtime output (re-generated each run)
+optimizer/results.jsonl
+optimizer/__pycache__/
+
+# Large dataset archive
+speech_commands_v0.02.tar.gz
+
+# Compiled firmware/sim artifacts (built in WSL, not source)
+firmware/picorv32_baremetal/*.o
+firmware/picorv32_baremetal/*.elf
+firmware/picorv32_baremetal/*.bin
+sim/verilator/obj_dir/
+sim/verilator/sim_picorv32
+sim/verilator/sim_picorv32_debug
+sim/verilator/sim_out.vcd

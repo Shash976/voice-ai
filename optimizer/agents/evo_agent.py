@@ -67,8 +67,16 @@ class EvoAgent(BaseAgent):
 
     def update(self, config: dict, reward: float, info: dict) -> None:
         self._evaluated.append((config, reward))
-        # Bound memory: keep at most 3*mu records (oldest low-reward entries drop off)
+        # Bound memory: keep at most 3*mu records
         cap = max(self.mu * 3, 30)
         if len(self._evaluated) > cap:
             self._evaluated.sort(key=lambda x: x[1], reverse=True)
             self._evaluated = self._evaluated[: self.mu * 2]
+
+    def warm_start(self, history: list[dict]) -> None:
+        """Replay historical (config, reward) pairs into the elite population."""
+        for record in history:
+            config = record.get("config") or {}
+            reward = record.get("reward", 0.0)
+            if config:
+                self._evaluated.append((config, reward))

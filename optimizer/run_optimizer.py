@@ -202,6 +202,14 @@ def main() -> None:
         env.clear_results()
 
     agent = AGENTS[args.agent](env.search_space)
+
+    # Warm-start the agent with previously observed results so it continues
+    # learning rather than starting cold.  (Fixes the broken --resume behaviour
+    # where agents ignored all history because update() was never replayed.)
+    if args.resume and env.history:
+        agent.warm_start(env.history)
+        print(f"Agent warm-started from {len(env.history)} historical records.")
+
     _print_header(args.agent, args.trials, env.search_space)
 
     state = env.reset()
@@ -229,7 +237,8 @@ def main() -> None:
             n_skip += 1
 
     elapsed = time.time() - t_start
-    print(f"\n  Completed {n_ok} trials ({n_skip} skipped) in {elapsed:.1f}s")
+    from runner import cache_info
+    print(f"\n  Completed {n_ok} trials ({n_skip} skipped) in {elapsed:.1f}s  |  {cache_info()}")
     _print_summary(env.history)
 
 

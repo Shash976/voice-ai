@@ -1,5 +1,24 @@
-"""search.py — design-space sweep for the TinyMAC accelerator.
+"""search.py — DEPRECATED.  Use run_optimizer.py instead.
 
+This file has been superseded by run_optimizer.py + env.py + agents/.
+It is kept only as a reference.  DO NOT USE for new experiments:
+
+  1. Its reward function (speedup / mac_lanes) is different from and
+     incompatible with reward.py.  Mixing records from both scripts in
+     results.jsonl produces a chart with incoherent reward axes.
+
+  2. It does not pass acc_width to the sim, so accumulator_width is always
+     treated as 32 regardless of what you configure.
+
+  3. Its Bayesian mode uses Optuna over a 5-point categorical space — TPE
+     over 5 discrete values is equivalent to random search.
+
+Run this instead:
+    python3 optimizer/run_optimizer.py --agent evo   --trials 40
+    python3 optimizer/run_optimizer.py --agent bayesian --trials 30
+
+Original search.py docstring follows:
+-----------------------------------------------------------------------
 Runs Verilator simulations across a parameter grid, logs every trial to
 results.jsonl, and prints a ranked summary at the end.
 

@@ -11,7 +11,7 @@
  *   0x20000000 - 0x20000FFF  TinyMAC accelerator registers (Stage 4)
  *
  * Usage:
- *   ./sim_picorv32 <firmware.bin> [--vcd <out.vcd>] [--mac-lanes N]
+ *   ./sim_picorv32 <firmware.bin> [--vcd <out.vcd>] [--mac-lanes N] [--acc-width N]
  *
  * Output:
  *   CSV printed to stdout (from firmware UART)
@@ -44,7 +44,8 @@ static uint8_t  ram[RAM_SIZE];
 static bool     sim_done  = false;
 static int      exit_code = 0;
 static uint64_t cycle_count = 0;
-static int      mac_lanes = 8;   /* set by --mac-lanes at startup */
+static int      mac_lanes  = 8;   /* set by --mac-lanes  at startup */
+static int      acc_width  = 32;  /* set by --acc-width  at startup (16 / 24 / 32) */
 
 /* ── Accelerator emulation ───────────────────────────────────────────────── */
 
@@ -98,6 +99,22 @@ static int8_t accel_clamp(int32_t x)
     return (int8_t)x;
 }
 
+/* Saturate a running accumulator to the configured bit-width.
+ * Called after every MAC so intermediate overflows are modelled correctly.
+ * acc_width=32 → no-op (int32 never overflows int64 intermediate).
+ * acc_width=24 → saturate to [-8_388_608, 8_388_607]
+ * acc_width=16 → saturate to [-32_768, 32_767]
+ * Any narrower width causes TinyVAD accuracy to drop to ~50 % (random).     */
+static inline int32_t accel_saturate(int32_t x)
+{
+    if (acc_width >= 32) return x;
+    const int32_t lo = -(1 << (acc_width - 1));
+    const int32_t hi =  (1 << (acc_width - 1)) - 1;
+    if (x > hi) return hi;
+    if (x < lo) return lo;
+    return x;
+}
+
 static void accel_execute(uint32_t cmd)
 {
     int32_t in_zp  = (int32_t)ar.zp_in;
@@ -116,7 +133,7 @@ static void accel_execute(uint32_t cmd)
             for (uint32_t i = 0; i < K; i++) {
                 int32_t x  = (int32_t)ram_r8(ar.in_ptr + i) - in_zp;
                 int32_t wv = (int32_t)ram_r8(ar.wt_ptr + o * K + i);
-                acc += x * wv;
+                acc = accel_saturate(acc + x * wv);   /* saturate per MAC */
             }
             int32_t qm = ram_r32(ar.mult_ptr + o * 4);
             int32_t qs = ram_r32(ar.rshi_ptr + o * 4);
@@ -143,7 +160,7 @@ static void accel_execute(uint32_t cmd)
                         if (pos >= 0 && pos < (int)inlen) {
                             int32_t x  = (int32_t)ram_r8(ar.in_ptr  + (uint32_t)pos * in_ch + ic) - in_zp;
                             int32_t wv = (int32_t)ram_r8(ar.wt_ptr  + (oc * in_ch + ic) * kern + k);
-                            acc += x * wv;
+                            acc = accel_saturate(acc + x * wv);  /* saturate per MAC */
                         }
                     }
                 }
@@ -278,9 +295,12 @@ int main(int argc, char **argv)
             vcd_path = argv[++i];
         else if (std::string(argv[i]) == "--mac-lanes" && i + 1 < argc)
             mac_lanes = std::atoi(argv[++i]);
+        else if (std::string(argv[i]) == "--acc-width" && i + 1 < argc)
+            acc_width = std::atoi(argv[++i]);
     }
     if (mac_lanes < 1) mac_lanes = 1;
-    fprintf(stderr, "[sim] mac_lanes=%d\n", mac_lanes);
+    if (acc_width != 16 && acc_width != 24 && acc_width != 32) acc_width = 32;
+    fprintf(stderr, "[sim] mac_lanes=%d acc_width=%d\n", mac_lanes, acc_width);
 
     load_firmware(fw_path);
 
@@ -357,10 +377,10 @@ int main(int argc, char **argv)
         fprintf(stderr, "[sim] TIMEOUT after %llu cycles\n",
                 (unsigned long long)cycle_count);
     else
-        fprintf(stderr, "[sim] Done in %llu cycles (wall: ~%.1f ms at 100 MHz) mac_lanes=%d\n",
+        fprintf(stderr, "[sim] Done in %llu cycles (wall: ~%.1f ms at 100 MHz) mac_lanes=%d acc_width=%d\n",
                 (unsigned long long)cycle_count,
                 (double)cycle_count / 100000.0,
-                mac_lanes);
+                mac_lanes, acc_width);
 
     if (vcd) { vcd->close(); delete vcd; }
     delete top;

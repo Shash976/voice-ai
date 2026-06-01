@@ -88,8 +88,13 @@ class OptEnv:
     # ── Gym-style interface ───────────────────────────────────────────────────
 
     def reset(self) -> dict:
-        """Return the initial state (does NOT clear results.jsonl unless clear_results() called)."""
-        # Resync trial counter to existing history length
+        """
+        Return the initial state dict.  Does NOT clear results.jsonl or
+        history — call clear_results() explicitly for a fresh run.
+
+        Returns a single dict (not a tuple); callers should use:
+            state = env.reset()
+        """
         self._trial = len(self._history)
         return self._make_state()
 
@@ -106,17 +111,18 @@ class OptEnv:
         """
         t0 = time.time()
 
-        # --- sim run (only mac_lanes is supported by the current binary) ---
-        mac_lanes = int(config.get("mac_lanes", 8))
-        sim_metrics = run_sim(mac_lanes)   # raises RuntimeError / FileNotFoundError on failure
+        # --- sim run  (mac_lanes + acc_width are genuinely simulated) ---
+        mac_lanes = int(config.get("mac_lanes",          8))
+        acc_width = int(config.get("accumulator_width", 32))
+        sim_metrics = run_sim(mac_lanes, acc_width)   # lru_cache: free on repeated configs
 
         elapsed = round(time.time() - t0, 2)
 
         # --- proxy metrics (analytical, instant) ---
         proxies = compute_proxies(config)
 
-        # --- reward ---
-        rew = compute_reward(sim_metrics, proxies, elapsed, self._reward_cfg)
+        # --- reward (wall-clock elapsed intentionally excluded) ---
+        rew = compute_reward(sim_metrics, proxies, self._reward_cfg)
 
         # --- build record ---
         record: dict = {

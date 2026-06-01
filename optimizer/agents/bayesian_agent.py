@@ -61,3 +61,35 @@ class BayesianAgent(BaseAgent):
         if self._pending is not None:
             self._study.tell(self._pending, reward)
             self._pending = None
+
+    def warm_start(self, history: list[dict]) -> None:
+        """Inject historical trials into the Optuna study so TPE uses them."""
+        try:
+            import optuna
+        except ImportError:
+            return
+
+        for record in history:
+            config = record.get("config") or {}
+            reward = record.get("reward", 0.0)
+            if not config:
+                continue
+            params = {
+                name: config[name]
+                for name in self.search_space
+                if name in config
+            }
+            if not params:
+                continue
+            distributions = {
+                name: optuna.distributions.CategoricalDistribution(
+                    self.search_space[name]["choices"]
+                )
+                for name in params
+            }
+            trial = optuna.trial.create_trial(
+                params=params,
+                distributions=distributions,
+                value=reward,
+            )
+            self._study.add_trial(trial)
