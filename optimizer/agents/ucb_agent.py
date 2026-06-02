@@ -12,12 +12,24 @@ Reward normalisation
 UCB1's theoretical guarantees require rewards in [0, 1].  We use fixed bounds
 derived from the reward formula rather than a running minimum (which is
 non-stationary and causes the entire history to silently re-interpret itself
-every time a new worst result arrives):
+every time a new worst result arrives).
 
-    REWARD_LO = −60.0   (worse than worst: overflow −50 + floor −8 + other −2)
-    REWARD_HI =   4.0   (slightly above the best realistic reward)
+These bounds were RE-DERIVED on 2026-06-02 after the frequency-coupled reward
+rewrite (real_speedup, max_speedup=576).  The reward no longer reaches −60: the
+overflow penalty is −50×(1−accuracy) = −50×0.266 = −13.3 for the synthetic
+int16 case (accuracy 0.734), and the realistic extremes over the full remaining
+space (5 lanes × 3 acc × 3 clk) are:
 
-Both bounds are intentionally pessimistic to ensure rewards stay in [0, 1].
+    worst ≈ −10.55  (lanes=1, acc=16, clk=20: acc penalty −13.3 + norm_spd ≈
+                     −0.something + small area/power; floor not hit as the
+                     overflow case still clears 10× real_speedup)
+    best  ≈  +4.01  (lanes=4, acc=24, clk=5: norm_spd 0.87, low area/power)
+
+    REWARD_LO = −12.0   (just below the worst realistic reward, −10.55)
+    REWARD_HI =   4.5   (just above the best realistic reward, +4.01)
+
+Check: (4.01 − (−12.0)) / 16.5 = 0.970 < 1 (optimum does NOT clamp to 1.0);
+       (−10.55 − (−12.0)) / 16.5 = 0.088 > 0 (worst stays inside [0, 1]).
 
 Independence assumption
 -----------------------
@@ -40,11 +52,12 @@ import math
 
 from .base_agent import BaseAgent
 
-# Fixed normalisation bounds — derived from reward formula extremes.
+# Fixed normalisation bounds — derived from reward formula extremes (2026-06-02).
 # NEVER use a running minimum: it shifts historical means when a new low arrives.
-_REWARD_LO: float = -60.0
-_REWARD_HI: float =   4.0
-_REWARD_RNG: float = _REWARD_HI - _REWARD_LO   # 64.0
+# See module docstring for the derivation: realistic reward range ≈ [−10.55, +4.01].
+_REWARD_LO: float = -12.0
+_REWARD_HI: float =   4.5
+_REWARD_RNG: float = _REWARD_HI - _REWARD_LO   # 16.5
 
 
 class UCBAgent(BaseAgent):
