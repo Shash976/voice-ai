@@ -6,14 +6,27 @@ and record the actual per-inference cycle counts.
 Run in WSL:
     python3 optimizer/measure_real.py
 
-Writes results to optimizer/sim_measurements.txt and updates
-SW_BASELINE_CYCLES in optimizer/runner.py and max_speedup in
-optimizer/search_space.yaml.
+Writes raw results to optimizer/sim_measurements.txt and PRINTS recommended
+constants for SW_BASELINE_CYCLES (runner.py) and max_speedup (search_space.yaml).
+It does NOT edit those files — copy the recommended values in by hand.
+
+NOTE on max_speedup: the reward's speedup term is FREQUENCY-AWARE (real_speedup,
+see reward.py), not the raw cycle ratio.  So the recommended max_speedup below is
+derived from reward.real_speedup() over the measured grid × clock choices, NOT
+from the cycle-based "speedup" (which is only reported for context).
 """
+import math
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+# Make `import reward` work when run as: python3 optimizer/measure_real.py
+sys.path.insert(0, str(Path(__file__).parent))
+try:
+    import reward as _R
+except Exception:  # pragma: no cover - reward import is optional for raw measurement
+    _R = None
 
 REPO   = Path(__file__).parent.parent
 SIM    = REPO / "sim" / "verilator" / "sim_picorv32"
@@ -102,17 +115,42 @@ def main():
     # Use 11_196_638 from the just-confirmed measurement if not overridden.
     SW_BASELINE = 11_196_638
 
-    # --- find the best config (highest speedup, acc=32, correct_v0=1) ---
+    # --- find the best config (highest CYCLE speedup, acc=32, correct_v0=1) ---
     valid = [r for r in rows if not r.get("error") and r["correct_v0"] == 1 and r["acc_width"] == 32]
     if valid:
         best = min(valid, key=lambda x: x["cycles_v0"])
-        max_speedup = SW_BASELINE / best["cycles_v0"]
+        cycle_speedup = SW_BASELINE / best["cycles_v0"]
         print(f"\nSW baseline (no-accel):    {SW_BASELINE:,} cycles/inference")
         print(f"Best config:               lanes={best['mac_lanes']}  acc={best['acc_width']}b  "
               f"{best['cycles_v0']:,} cycles/inference")
-        print(f"Max measured speedup:      {max_speedup:.1f}x")
-        print(f"\n→ Update in search_space.yaml:  max_speedup: {round(max_speedup * 1.1)}.0"
-              f"  (10% headroom above observed max)")
+        print(f"Max CYCLE speedup:         {cycle_speedup:.1f}x  (frequency-independent; context only)")
+
+        # --- FREQUENCY-AWARE max_speedup recommendation (matches reward.py) -------
+        # The reward uses real_speedup = SW_latency_ns / (cycles × effective_clock_ns).
+        # max_speedup must bound the largest real_speedup over the WHOLE grid (incl.
+        # the fastest clock choice) so the log2 term never spuriously clamps.
+        if _R is not None:
+            clock_choices = [5, 10, 20]
+            max_real = 0.0
+            best_real = None
+            for r in rows:
+                if r.get("error"):
+                    continue
+                for clk in clock_choices:
+                    cfg = {"mac_lanes": r["mac_lanes"],
+                           "accumulator_width": r["acc_width"],
+                           "clock_period_ns": clk}
+                    rs = _R.real_speedup(cfg, r["cycles_v0"])
+                    if rs > max_real:
+                        max_real, best_real = rs, (r["mac_lanes"], r["acc_width"], clk)
+            rec = math.ceil(max_real * 1.12)
+            print(f"Max REAL speedup:          {max_real:.1f}x  at lanes={best_real[0]} "
+                  f"acc={best_real[1]}b clk={best_real[2]}ns (frequency-aware; reward uses this)")
+            print(f"\n→ Update in search_space.yaml:  max_speedup: {rec}.0"
+                  f"  (ceil of {max_real:.1f} × 1.12 headroom; frequency-aware)")
+        else:
+            print("\n(reward.py not importable — skipping frequency-aware max_speedup "
+                  "recommendation; see reward.py for the real_speedup model.)")
         print(f"→ Update in runner.py:  SW_BASELINE_CYCLES = {SW_BASELINE}")
 
     # --- save results ---
