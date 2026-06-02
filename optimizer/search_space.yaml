@@ -49,35 +49,32 @@ proxy_params:
     default: 10
     description: >
       Target clock period in ns.  Affects:
-        - power_proxy (∝ clock_frequency)
+        - real_speedup: latency_ns = avg_cycles × max(clock_period, critical_path),
+          real_speedup = SW_BASELINE_LATENCY_NS / latency_ns.  A FASTER clock that
+          meets timing raises real_speedup (more reward); a clock faster than the
+          critical path is capped (no free reward — see reward.effective_clock_ns).
+        - power_proxy (∝ clock_frequency, uses the requested clock)
         - timing_slack (slack = clock_period - critical_path)
-      The cycle-count speedup is frequency-independent, so this axis captures
-      only the area/power/timing trade-off, not raw throughput.
-      At 16 lanes + 5 ns: timing violation fires (critical_path > 5 ns).
+      At 16 lanes + 5 ns: timing violation fires (critical_path = 5.05–5.10 ns > 5 ns).
 
-  input_buffer_bytes:
-    type: categorical
-    choices: [256, 512, 1024, 2048, 4096]
-    default: 1024
-    description: >
-      On-chip input SRAM size (proxy only — behavioral sim reads directly from
-      main RAM with no cache model).  Contributes to area_proxy (20% weight).
-
-  weight_buffer_bytes:
-    type: categorical
-    choices: [256, 512, 1024, 2048, 4096]
-    default: 1024
-    description: >
-      On-chip weight SRAM size (proxy only — same caveat as input_buffer_bytes).
+  # input_buffer_bytes / weight_buffer_bytes were REMOVED from the active search
+  # on 2026-06-02.  The behavioral Verilator sim reads directly from main RAM and
+  # has NO buffer/cache model, so optimizing buffer sizes would be guessing
+  # performance — which violates the Stage-5 principle "score real results, don't
+  # guess".  SRAM area/timing becomes real in Stage-6 ORFS (ASAP7); the buffer
+  # axes belong there.  reward.area_proxy still defaults both to 1024 B via .get(),
+  # keeping the fixed 20% SRAM area term at its baseline value (area = 1.0 at the
+  # baseline config).
 
 # ── Reward function ──────────────────────────────────────────────────────────
 # See reward.py for the full formula and implementation.
 #
-# Speedup uses log2 normalisation: log2(speedup)/log2(max_speedup).
-#   speedup=0.6  → −0.10  (slower than SW — hits perf floor penalty)
-#   speedup=1.0  →  0.00  (break-even)
-#   speedup=5.8  →  0.36  (realistic 8-lane behavioral)
-#   speedup=191  →  0.99  (theoretical 8-lane with 0 overhead)
+# Speedup uses log2 normalisation: log2(real_speedup)/log2(max_speedup), where
+# real_speedup is the FREQUENCY-AWARE (ns-based) speedup, not the raw cycle ratio.
+#   real_speedup=1.0   →  0.00  (break-even)
+#   real_speedup=10    →  0.36  (perf floor — below this hits −8.0 penalty)
+#   real_speedup=192   →  0.82  (8 lanes @ 10 ns)
+#   real_speedup=514   →  0.98  (16 lanes @ critical-path clock — fastest feasible)
 #
 # Area and power are SECONDARY — the optimizer's primary job is maximising
 # speedup.  Area/power trade off only after speedup is good.
@@ -90,11 +87,18 @@ reward:
   w_area:             -0.4
   w_power:            -0.4
   w_timing_violation: -3.0
-  # max_speedup is the log2 denominator for the speedup term.
-  # EMPIRICALLY MEASURED 2026-06-01:
-  #   16 lanes → 257.7×  (SW=11.2M, accel=43,447 cycles, TinyVAD model)
-  # Using 300 gives 15% headroom above the measured maximum.
-  # Re-measure whenever the model changes: python3 measure_sweep.py
-  max_speedup:        300.0
-  min_useful_speedup:  10.0   # below 10× the overhead isn't worth the area
+  # max_speedup is the log2 denominator for the speedup term.  It must cover the
+  # full real_speedup range (frequency-aware), which is LARGER than the old
+  # cycle-only range because a sub-10ns clock multiplies throughput.
+  # DERIVATION (2026-06-02, synthetic TinyVAD model avg_cycles ≈ 28000+242000/lanes,
+  # SW_BASELINE_LATENCY_NS = 11,196,638 × 10 ns):
+  #   max feasible real_speedup = at lanes=16, acc=24 (smallest correct acc),
+  #   effective_clock = max(5, critical_path=5.05) = 5.05 ns:
+  #     latency_ns   = (28000 + 242000/16) × 5.05 = 43125 × 5.05 = 217,781 ns
+  #     real_speedup = 111,966,380 / 217,781 = 514.12×
+  #   max_speedup = ceil(514.12 × 1.12) = 576  (≈12% headroom above the maximum).
+  #   At the maximum, norm_spd = log2(514.12)/log2(576) = 9.006/9.170 = 0.982 (< 1, no clamp).
+  # Re-derive whenever the timing model, SW baseline, or lane set changes.
+  max_speedup:        576.0
+  min_useful_speedup:  10.0   # below 10× real-time speedup the overhead isn't worth the area
   perf_floor_penalty:  -8.0
