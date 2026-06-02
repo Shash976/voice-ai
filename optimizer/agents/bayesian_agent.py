@@ -51,6 +51,17 @@ class BayesianAgent(BaseAgent):
         self._pending: "optuna.Trial | None" = None
 
     def suggest(self, state: dict, history: list[dict]) -> dict:
+        import optuna
+
+        # Resolve any dangling trial first.  run_optimizer skips a trial (and
+        # never calls update()) when the sim raises RuntimeError, leaving the
+        # previous ask()'d trial stuck in RUNNING state.  Optuna's TPE then keeps
+        # re-modelling that phantom RUNNING trial, leaking it forever.  Mark it
+        # FAILED before asking a new one so the study has no dangling RUNNING.
+        if self._pending is not None:
+            self._study.tell(self._pending, state=optuna.trial.TrialState.FAIL)
+            self._pending = None
+
         self._pending = self._study.ask()
         config: dict = {}
         for name, spec in self.search_space.items():
