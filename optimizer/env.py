@@ -17,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-from reward import compute_proxies, compute_reward
+from reward import compute_proxies, compute_reward, real_speedup
 from runner import SW_BASELINE_CYCLES, run_sim
 
 RESULTS_FILE = Path(__file__).parent / "results.jsonl"
@@ -120,6 +120,17 @@ class OptEnv:
 
         # --- proxy metrics (analytical, instant) ---
         proxies = compute_proxies(config)
+
+        # --- frequency-aware (real-time) speedup ---------------------------------
+        # The sim's cycle-based "speedup" is frequency-independent.  Here we have
+        # both avg_cycles and the full config (incl. clock_period_ns), so we
+        # compute the real-time speedup the reward must use and merge it into
+        # proxy_metrics.  The cycle-based sim_metrics["speedup"] is left untouched
+        # for the dashboard / backward compatibility.
+        avg_cycles = sim_metrics["avg_cycles"]
+        r_speedup  = real_speedup(config, avg_cycles)
+        proxies["real_speedup"] = round(r_speedup, 3)
+        proxies["latency_ns"]   = round(avg_cycles * proxies["effective_clock_ns"], 1)
 
         # --- reward (wall-clock elapsed intentionally excluded) ---
         rew = compute_reward(sim_metrics, proxies, self._reward_cfg)
