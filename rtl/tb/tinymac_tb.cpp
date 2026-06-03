@@ -87,16 +87,17 @@ static int8_t golden_channel(int m, int K,
 
 /* ── Operand packing for the LANES-wide chunk ports ──────────────────────── */
 
-static uint32_t pack_chunk(const int8_t *base, int idx0, int K, int total)
+/* Pack up to 8 lanes into a 64-bit word (Verilator scalar port type for
+ * LANES<=8). LANES>8 needs the wide (VlWide) port API — not supported here. */
+static uint64_t pack_chunk(const int8_t *base, int idx0, int K, int total)
 {
-    /* total = K for inputs; for weights the row is laid out [m*K + k]. */
-    uint32_t w = 0;
+    static_assert(TB_LANES <= 8, "tb supports LANES<=8 (64-bit chunk port)");
+    uint64_t w = 0;
     for (int lane = 0; lane < TB_LANES; lane++) {
         int k = idx0 + lane;
         uint8_t b = 0;
         if (k < K && (idx0 + lane) < total) b = (uint8_t)base[k];
-        /* clamp: only pack within the row */
-        w |= (uint32_t)b << (8 * lane);
+        w |= (uint64_t)b << (8 * lane);
     }
     return w;
 }

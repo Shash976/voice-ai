@@ -40,20 +40,24 @@ module requantize (
     /* Round and shift down by 31 (Q31).  +(1<<30) then arithmetic >> 31. */
     wire signed [63:0] q31 = (prod + 64'sd1073741824) >>> 31;
 
-    /* Variable signed shift.  Shift magnitude is small (< 32) in practice. */
+    /* Variable signed shift.  Shift magnitude is small (< 32) in practice.
+     * Shift amounts are taken as explicitly *unsigned* slices so no signed/
+     * unsigned operand mixing reaches the RTLIL generator. */
+    wire [5:0] rshift_amt = shift[5:0];           /* right-shift magnitude */
+    wire [5:0] lshift_amt = (6'd0 - shift[5:0]);  /* left-shift magnitude (shift<0) */
     reg signed [63:0] shifted;
     always @* begin
         if (shift > 0)
             /* round-to-nearest right shift: +(1 << (shift-1)) then >>> shift */
-            shifted = (q31 + (64'sd1 <<< (shift[5:0] - 6'd1))) >>> shift[5:0];
+            shifted = (q31 + (64'sd1 <<< (rshift_amt - 6'd1))) >>> rshift_amt;
         else if (shift < 0)
-            shifted = q31 <<< ((-shift) & 32'h3F);
+            shifted = q31 <<< lshift_amt;
         else
             shifted = q31;
     end
 
     /* + out_zp, then ReLU floor at out_zp, then clamp to int8. */
-    wire signed [63:0] out_zp_e = {{32{out_zp[31]}}, out_zp};
+    wire signed [63:0] out_zp_e = $signed({{32{out_zp[31]}}, out_zp});
     wire signed [63:0] biased   = shifted + out_zp_e;
     wire signed [63:0] reld     = (relu && (biased < out_zp_e)) ? out_zp_e : biased;
 

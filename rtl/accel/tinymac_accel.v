@@ -94,15 +94,21 @@ module tinymac_accel #(
      * unused.  Tie them off so lint stays clean. */
     wire _unused_ok = &{1'b0, cfg_in_zp[31:9]};
 
-    /* ── Tail-chunk lane enable: enable min(LANES, K-k_base) low lanes ───── */
+    /* Unsigned copies of the (signed `integer`) parameters, so they never mix
+     * signedness with unsigned signals in expressions below — strict Yosys
+     * frontends assert on signed-integer/unsigned-signal operand mismatches. */
+    localparam [31:0] LANES_U = LANES;
+
+    /* ── Tail-chunk lane enable: enable min(LANES, K-k_base) low lanes ─────
+     * Built as an unsigned mask (no signed loop variable): when fewer than
+     * LANES inputs remain, only the low k_rem lanes are enabled. k_rem >= 1
+     * whenever this is used (state S_MAC). */
     wire [15:0] k_rem  = K_reg - k_base;
-    wire [31:0] k_next = {16'd0, k_base} + LANES;   /* next chunk base */
-    reg  [LANES-1:0] lane_en;
-    integer le;
-    always @* begin
-        for (le = 0; le < LANES; le = le + 1)
-            lane_en[le] = (le < k_rem);   /* k_rem >= 1 in S_MAC */
-    end
+    wire [31:0] k_next = {16'd0, k_base} + LANES_U;        /* next chunk base */
+    /* Low min(LANES, k_rem) bits set, all-unsigned, exactly LANES wide:
+     * shifting LANES ones left by k_rem and inverting leaves the low k_rem
+     * bits set; when k_rem >= LANES everything shifts out → all lanes on. */
+    wire [LANES-1:0] lane_en = ~({LANES{1'b1}} << k_rem);
 
     /* ── Combinational MAC array ────────────────────────────────────────── */
     wire signed [31:0] psum;
