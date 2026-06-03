@@ -117,11 +117,12 @@ module tinymac_accel #(
     /* ── Accumulator saturation to ACC_W bits ───────────────────────────── */
     wire signed [31:0] acc_sum = acc + psum;
     reg  signed [31:0] acc_sat;
-    /* synthesis-time bounds (only used when ACC_W < 32) */
-    localparam signed [31:0] ACC_HI = (ACC_W >= 32) ? 32'sh7FFFFFFF
-                                     : ((32'sd1 <<< (ACC_W - 1)) - 32'sd1);
-    localparam signed [31:0] ACC_LO = (ACC_W >= 32) ? -32'sd2147483648
-                                     : -(32'sd1 <<< (ACC_W - 1));
+    /* Saturation bounds. Only referenced when ACC_W < 32 (the always-block
+     * below short-circuits the >=32 case), so the ACC_W=32 wraparound of these
+     * constants is harmless. Kept in clean signed form to avoid frontend
+     * signedness asserts. */
+    localparam signed [31:0] ACC_HI = (32'sd1 <<< (ACC_W - 1)) - 32'sd1;
+    localparam signed [31:0] ACC_LO = -(32'sd1 <<< (ACC_W - 1));
     always @* begin
         if (ACC_W >= 32)        acc_sat = acc_sum;
         else if (acc_sum > ACC_HI) acc_sat = ACC_HI;
@@ -165,7 +166,7 @@ module tinymac_accel #(
                 if (start) begin
                     M_reg      <= cfg_m;
                     K_reg      <= cfg_k;
-                    in_zp_reg  <= cfg_in_zp[8:0];
+                    in_zp_reg  <= $signed(cfg_in_zp[8:0]);
                     out_zp_reg <= cfg_out_zp;
                     relu_reg   <= cfg_relu;
                     m_cnt      <= 16'd0;

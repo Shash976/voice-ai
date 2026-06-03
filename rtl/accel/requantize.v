@@ -57,9 +57,11 @@ module requantize (
     wire signed [63:0] biased   = shifted + out_zp_e;
     wire signed [63:0] reld     = (relu && (biased < out_zp_e)) ? out_zp_e : biased;
 
+    /* int8 clamp. reld[7:0] wrapped in $signed so every ternary branch is
+     * signed (strict Yosys frontends assert on mixed-signedness selects). */
     assign out_q = (reld >  64'sd127)  ?  8'sd127 :
                    (reld < -64'sd128)  ? -8'sd128 :
-                   reld[7:0];
+                   $signed(reld[7:0]);
 
 endmodule
 

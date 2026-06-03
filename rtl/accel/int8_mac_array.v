@@ -42,7 +42,9 @@ module int8_mac_array #(
              * cannot overflow, then multiplied by the int8 weight. */
             wire signed [9:0]  in_adj = $signed({in_i[7], in_i}) - in_zp;
             wire signed [17:0] mul    = in_adj * wt_i;
-            assign prod[i] = lane_en[i] ? {{14{mul[17]}}, mul} : 32'sd0;
+            /* sign-extend to 32 bits; both ternary branches kept signed so
+             * strict Yosys frontends don't assert on a signedness mismatch. */
+            assign prod[i] = lane_en[i] ? $signed({{14{mul[17]}}, mul}) : 32'sd0;
         end
     endgenerate
 
