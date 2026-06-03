@@ -51,7 +51,7 @@ source "$ORFS/env.sh"
 cd "$HERE"
 
 CSV="$HERE/sweep_results.csv"
-echo "lanes,acc_w,clk_ns,variant,status,area_um2,util_pct,wns_ns,tns_ns,power_mw,fmax_mhz,gds" > "$CSV"
+echo "lanes,acc_w,clk_ns,variant,status,area_um2,util_pct,wns_ns,tns_ns,setup_viol,power_mw,fmax_mhz,timing_met,gds" > "$CSV"
 
 run_one() {
     local lanes="$1" acc="$2" clk="$3"
@@ -61,6 +61,7 @@ run_one() {
     local gen_cfg="$cfgdir/config_${variant}.mk"
     local gds="$HERE/results/$PLATFORM/$DESIGN/$variant/6_final.gds"
     local rpt="$HERE/reports/$PLATFORM/$DESIGN/$variant/6_finish.rpt"
+    local rlog="$HERE/logs/$PLATFORM/$DESIGN/$variant/6_report.log"
 
     echo
     echo "════════ $variant  (LANES=$lanes ACC_W=$acc clk=${clk}ns) ════════"
@@ -93,26 +94,34 @@ EOF
              > "$HERE/sweep_${variant}.log" 2>&1
     fi
 
-    # ── parse metrics from the finish report ────────────────────────────────
-    local status area util wns tns pw fmax
+    # ── parse metrics ────────────────────────────────────────────────────────
+    # area/util live in the report LOG; timing/power in the finish RPT. Lines:
+    #   (6_report.log) "Design area 19738 um^2 48% utilization."
+    #   (6_finish.rpt) "wns max -1.72"   "tns max -25.86"  (value = last field)
+    #                  "core_clock period_min = 3.72 fmax = 268.64"
+    #                  "setup violation count 40"
+    #                  report_power "Total ... <total_W> 100.0%"  (total = field 5)
+    local status area util wns tns pw fmax setupv met
     if [ -f "$rpt" ]; then
         status="ok"
-        area=$(grep -m1 "Design area" "$rpt" | awk '{print $3}')
-        util=$(grep -m1 "Design area" "$rpt" | awk '{print $5}' | tr -d '%')
-        wns=$(grep -m1 -E '^wns '          "$rpt" | awk '{print $2}')
-        tns=$(grep -m1 -E '^tns '          "$rpt" | awk '{print $2}')
+        area=$(grep -m1 "Design area" "$rlog" 2>/dev/null | awk '{print $3}')
+        util=$(grep -m1 "Design area" "$rlog" 2>/dev/null | awk '{print $5}' | tr -d '%')
+        wns=$(grep -m1 -E '^wns ' "$rpt" | awk '{print $NF}')
+        tns=$(grep -m1 -E '^tns ' "$rpt" | awk '{print $NF}')
+        fmax=$(grep -m1 'period_min' "$rpt" | sed -nE 's/.*fmax *= *([0-9.]+).*/\1/p')
+        setupv=$(grep -m1 'setup violation count' "$rpt" | awk '{print $NF}')
         local pw_w; pw_w=$(grep -m1 -E '^Total ' "$rpt" | awk '{print $5}')
-        pw=$(awk -v w="$pw_w" 'BEGIN{ if(w=="")print ""; else printf "%.4f", w*1000 }')
-        fmax=$(awk -v c="$clk" -v w="$wns" 'BEGIN{ if(w=="")print""; else {p=c-w; if(p>0)printf "%.1f",1000/p; else print "inf"} }')
+        pw=$(awk -v w="$pw_w" 'BEGIN{ if(w=="")print ""; else printf "%.1f", w*1000 }')
+        met=$(awk -v w="$wns" 'BEGIN{ if(w=="")print"?"; else if(w+0<0)print"NO"; else print"yes" }')
     else
-        status="FAIL"; area=""; util=""; wns=""; tns=""; pw=""; fmax=""
+        status="FAIL"; area=""; util=""; wns=""; tns=""; pw=""; fmax=""; setupv=""; met="?"
         echo "  !! no finish report — see sweep_${variant}.log"
     fi
     [ -f "$gds" ] || gds="(none)"
 
-    echo "$lanes,$acc,$clk,$variant,$status,$area,$util,$wns,$tns,$pw,$fmax,$gds" >> "$CSV"
-    printf "  area=%s um2  util=%s%%  WNS=%s ns  power=%s mW  Fmax=%s MHz\n" \
-        "${area:-NA}" "${util:-NA}" "${wns:-NA}" "${pw:-NA}" "${fmax:-NA}"
+    echo "$lanes,$acc,$clk,$variant,$status,$area,$util,$wns,$tns,$setupv,$pw,$fmax,$met,$gds" >> "$CSV"
+    printf "  area=%s um2  util=%s%%  WNS=%s ns (met=%s)  power=%s mW  Fmax=%s MHz\n" \
+        "${area:-NA}" "${util:-NA}" "${wns:-NA}" "${met}" "${pw:-NA}" "${fmax:-NA}"
 }
 
 while IFS= read -r line; do
