@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# sweep.sh — run a GRID of accelerator configs through the full ORFS RTL→GDS
+# flow and collect a comparison table (area / timing / power), one GDS each.
+#
+# This is the "see different chip configurations" tool: it drives the same flow
+# as run.sh, but once per config, overriding the RTL parameters (LANES, ACC_W)
+# via ORFS VERILOG_TOP_PARAMS and the clock via a generated SDC. Each config
+# gets its own FLOW_VARIANT, so results/<plat>/<design>/<variant>/6_final.gds
+# can be opened independently in the GUI.
+#
+# Usage (on the VM, where /opt/OpenROAD-flow-scripts lives):
+#   physical/orfs/make/sweep.sh                 # default grid on nangate45
+#   physical/orfs/make/sweep.sh sky130hd        # a different PDK
+#   CONFIGS_FILE=my.txt physical/orfs/make/sweep.sh   # custom grid
+#
+# Each line of the grid is "LANES ACC_W CLK_NS". Edit GRID below or supply a
+# CONFIGS_FILE with the same format (one config per line, '#'=comment).
+#
+# Each full-flow run takes a few minutes — the default grid is intentionally
+# small. Re-running skips configs whose 6_final.gds already exists.
+set -uo pipefail
+
+ORFS="${ORFS_DIR:-/opt/OpenROAD-flow-scripts}"
+PLATFORM="${1:-nangate45}"
+DESIGN="tinymac_accel"
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/../../.." && pwd)"
+
+# ── The grid: "LANES ACC_W CLK_NS" ──────────────────────────────────────────
+# Default sweeps the lane count (the dominant area/speed knob) at the Stage-5
+# accumulator width and a fixed clock. Add ACC_W or clock variations as rows.
+GRID_DEFAULT=$'1 24 2.0\n2 24 2.0\n4 24 2.0\n8 24 2.0\n16 24 2.0'
+if [ -n "${CONFIGS_FILE:-}" ] && [ -f "${CONFIGS_FILE}" ]; then
+    GRID="$(grep -vE '^\s*#|^\s*$' "$CONFIGS_FILE")"
+else
+    GRID="$GRID_DEFAULT"
+fi
+
+[ -f "$ORFS/env.sh" ] || { echo "ERROR: ORFS not found at $ORFS (set ORFS_DIR)"; exit 1; }
+
+# ── Stage the RTL (shared by every variant) ─────────────────────────────────
+mkdir -p "$HERE/src/$DESIGN" "$HERE/$PLATFORM/$DESIGN"
+cp "$REPO/rtl/accel/tinymac_accel.v" \
+   "$REPO/rtl/accel/int8_mac_array.v" \
+   "$REPO/rtl/accel/requantize.v" \
+   "$HERE/src/$DESIGN/"
+
+# shellcheck disable=SC1090
+source "$ORFS/env.sh"
+cd "$HERE"
+
+CSV="$HERE/sweep_results.csv"
+echo "lanes,acc_w,clk_ns,variant,status,area_um2,util_pct,wns_ns,tns_ns,power_mw,fmax_mhz,gds" > "$CSV"
+
+run_one() {
+    local lanes="$1" acc="$2" clk="$3"
+    local variant="L${lanes}_A${acc}_c${clk/./p}"
+    local cfgdir="$HERE/$PLATFORM/$DESIGN"
+    local gen_sdc="$cfgdir/constraint_${variant}.sdc"
+    local gen_cfg="$cfgdir/config_${variant}.mk"
+    local gds="$HERE/results/$PLATFORM/$DESIGN/$variant/6_final.gds"
+    local rpt="$HERE/reports/$PLATFORM/$DESIGN/$variant/6_finish.rpt"
+
+    echo
+    echo "════════ $variant  (LANES=$lanes ACC_W=$acc clk=${clk}ns) ════════"
+
+    # per-variant clock constraints (clone base SDC, swap the period)
+    sed "s/^set clk_period.*/set clk_period    ${clk}/" \
+        "$cfgdir/constraint.sdc" > "$gen_sdc"
+
+    # per-variant config.mk: overrides params + points at the generated SDC
+    cat > "$gen_cfg" <<EOF
+export DESIGN_HOME = .
+export DESIGN_NAME = $DESIGN
+export PLATFORM    = $PLATFORM
+export VERILOG_FILES = \$(DESIGN_HOME)/src/\$(DESIGN_NAME)/tinymac_accel.v \\
+                       \$(DESIGN_HOME)/src/\$(DESIGN_NAME)/int8_mac_array.v \\
+                       \$(DESIGN_HOME)/src/\$(DESIGN_NAME)/requantize.v
+export SDC_FILE      = \$(DESIGN_HOME)/$PLATFORM/\$(DESIGN_NAME)/constraint_${variant}.sdc
+export CORE_UTILIZATION      ?= 40
+export PLACE_DENSITY          ?= 0.60
+export SYNTH_REPEATABLE_BUILD ?= 1
+export VERILOG_TOP_PARAMS = LANES $lanes ACC_W $acc
+EOF
+
+    if [ -f "$gds" ]; then
+        echo "  (already built — reusing $gds)"
+    else
+        make --file="$ORFS/flow/Makefile" \
+             FLOW_HOME="$ORFS/flow" WORK_HOME="$HERE" \
+             DESIGN_CONFIG="$gen_cfg" FLOW_VARIANT="$variant" \
+             > "$HERE/sweep_${variant}.log" 2>&1
+    fi
+
+    # ── parse metrics from the finish report ────────────────────────────────
+    local status area util wns tns pw fmax
+    if [ -f "$rpt" ]; then
+        status="ok"
+        area=$(grep -m1 "Design area" "$rpt" | awk '{print $3}')
+        util=$(grep -m1 "Design area" "$rpt" | awk '{print $5}' | tr -d '%')
+        wns=$(grep -m1 -E '^wns '          "$rpt" | awk '{print $2}')
+        tns=$(grep -m1 -E '^tns '          "$rpt" | awk '{print $2}')
+        local pw_w; pw_w=$(grep -m1 -E '^Total ' "$rpt" | awk '{print $5}')
+        pw=$(awk -v w="$pw_w" 'BEGIN{ if(w=="")print ""; else printf "%.4f", w*1000 }')
+        fmax=$(awk -v c="$clk" -v w="$wns" 'BEGIN{ if(w=="")print""; else {p=c-w; if(p>0)printf "%.1f",1000/p; else print "inf"} }')
+    else
+        status="FAIL"; area=""; util=""; wns=""; tns=""; pw=""; fmax=""
+        echo "  !! no finish report — see sweep_${variant}.log"
+    fi
+    [ -f "$gds" ] || gds="(none)"
+
+    echo "$lanes,$acc,$clk,$variant,$status,$area,$util,$wns,$tns,$pw,$fmax,$gds" >> "$CSV"
+    printf "  area=%s um2  util=%s%%  WNS=%s ns  power=%s mW  Fmax=%s MHz\n" \
+        "${area:-NA}" "${util:-NA}" "${wns:-NA}" "${pw:-NA}" "${fmax:-NA}"
+}
+
+while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    read -r L A C <<< "$line"
+    run_one "$L" "$A" "$C"
+done <<< "$GRID"
+
+echo
+echo "════════════════════════ SWEEP SUMMARY ════════════════════════"
+column -t -s, "$CSV"
+echo
+echo "CSV: $CSV"
+echo "Open any layout:  klayout results/$PLATFORM/$DESIGN/<variant>/6_final.gds"
+echo "Or in the OpenROAD GUI per variant:"
+echo "  make --file=$ORFS/flow/Makefile FLOW_HOME=$ORFS/flow WORK_HOME=$HERE \\"
+echo "       DESIGN_CONFIG=$HERE/$PLATFORM/$DESIGN/config_<variant>.mk \\"
+echo "       FLOW_VARIANT=<variant> gui_final"
