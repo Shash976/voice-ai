@@ -80,8 +80,8 @@ module tinymac_accel #(
     reg [15:0] m_cnt;       /* current output channel */
     reg [15:0] k_base;      /* current input chunk base index */
     reg [15:0] M_reg, K_reg;
-    reg signed [8:0] in_zp_reg;     /* zero-points fit int8 range */
-    reg [31:0] out_zp_reg;
+    reg signed [8:0]  in_zp_reg;    /* zero-points fit int8 range */
+    reg signed [31:0] out_zp_reg;   /* signed so it connects to requantize w/o a cast */
     reg        relu_reg;
     reg signed [31:0] acc;
     reg [31:0] cyc_cnt;     /* cycles since start */
@@ -142,7 +142,7 @@ module tinymac_accel #(
         .acc    (acc),
         .q_mult (i_qmult),
         .shift  (i_rshift),
-        .out_zp ($signed(out_zp_reg)),
+        .out_zp (out_zp_reg),
         .relu   (relu_reg),
         .out_q  (out_q)
     );
@@ -172,7 +172,7 @@ module tinymac_accel #(
                 if (start) begin
                     M_reg      <= cfg_m;
                     K_reg      <= cfg_k;
-                    in_zp_reg  <= $signed(cfg_in_zp[8:0]);
+                    in_zp_reg  <= cfg_in_zp[8:0];   /* bit-copy into signed reg */
                     out_zp_reg <= cfg_out_zp;
                     relu_reg   <= cfg_relu;
                     m_cnt      <= 16'd0;
