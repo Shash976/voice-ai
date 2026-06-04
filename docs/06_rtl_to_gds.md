@@ -2,7 +2,15 @@
 
 Stage 6 turns the accelerator from a **C++ behavioral model** (Stage 4) into
 **synthesizable Verilog RTL**, then pushes it through OpenROAD-flow-scripts to
-get a real chip layout (GDS) plus area / timing / power numbers. **Runs in WSL.**
+get a real chip layout (GDS) plus area / timing / power numbers.
+
+> **Status: working.** A full nangate45 GDS of `tinymac_accel` has been produced
+> via the classic ORFS `make` flow. RTL is bit-exact-verified; synthesis, place,
+> route, and GDS all run. Numbers below are real. Remaining: realistic-clock
+> re-sweep, asap7 retarget, and wiring the sweep to the Stage-5 optimizer.
+>
+> Synthesis/lint run anywhere with Yosys; the full P&R→GDS flow runs where a real
+> OpenROAD lives (the company VM at `/opt/OpenROAD-flow-scripts`).
 
 ---
 
@@ -83,73 +91,133 @@ honest Stage-6 finding: the idealized speedup slightly overstates hardware.
 
 ---
 
-## The physical flow ([`../physical/orfs/`](../physical/orfs))
+## Getting RTL to synthesize: the strict-Yosys signedness gotcha
 
-Stage 6 splits into two halves:
+Modern Yosys (0.64, as shipped in the VM's ORFS) is far stricter about
+signed/unsigned mixing than older builds, and asserts hard
+(`genrtlil.cc:2214: arg->is_signed == sig.as_wire()->is_signed`). Three patterns
+in the RTL had to be cleaned to pass it — all behavior-preserving:
 
-1. **Synthesis** (Yosys) → gate netlist + cell area. Needs only `yosys` + a PDK
-   liberty file, both already on disk. **Done — runs offline.**
-2. **Place & route → GDS** (OpenROAD) → WNS/TNS, wirelength, power, layout.
-   Needs an OpenROAD binary. **Blocked on this machine** (see below).
+1. **No `$signed()` on an unsigned whole wire.** `$signed(out_zp_reg)` where
+   `out_zp_reg` is unsigned trips the assert. Fix: declare the reg `signed` and
+   connect it directly (no cast). This was the final blocker.
+2. **No signed `integer` parameters in unsigned expressions.** `parameter integer
+   LANES` is *signed*; `{16'd0,k_base} + LANES` mixes it with an unsigned signal.
+   Fix: a `localparam [31:0] LANES_U = LANES` unsigned copy.
+3. **No mixed-signedness `?:` branches.** Every ternary arm must share signedness.
 
-### Synthesis — `physical/orfs/synth_area.sh`
+Lesson: keep every operand's signedness explicit and consistent. The Verilator
+lint on the laptop (`yosys 0.9`) did **not** catch these — only the VM's 0.64 did.
+The unit testbench confirmed each fix left the math bit-identical.
+
+## The physical flow ([`../physical/orfs/make/`](../physical/orfs/make))
+
+Two routes were tried:
+
+- **bazel-orfs** (`physical/orfs/BUILD.bazel`, `sync.sh`) — the modern Bazel
+  driver. **Abandoned**: its gallery workspace fetches a Python stack from PyPI
+  and the networks available timed out, aborting before synthesis. Files kept for
+  reference only.
+- **Classic ORFS `make` flow** (`physical/orfs/make/`) — the working path. The
+  company VM has a full OpenROAD at `/opt/OpenROAD-flow-scripts`. A design is just
+  three files (`config.mk`, `constraint.sdc`, the RTL); `run.sh` stages them and
+  invokes the ORFS Makefile through to GDS. **This is what produced the layout.**
 
 ```bash
-physical/orfs/synth_area.sh sky130hd     # → reports/sky130hd_{area.rpt,synth.log,netlist.v}
-physical/orfs/synth_area.sh nangate45
+# one config, full RTL→GDS:
+physical/orfs/make/run.sh                 # nangate45
+physical/orfs/make/run.sh nangate45 gui_final   # + open the OpenROAD GUI
+
+# many configs compared (grid search):
+physical/orfs/make/sweep.sh               # sweeps LANES={1,2,4,8,16}
 ```
 
-Standalone Yosys: `read_verilog → synth -flatten → dfflibmap → abc -liberty →
-stat`. Maps the RTL to real standard cells and reports area. Timing-unaware
-(no clock constraint), so it gives area + gate count but not WNS.
+`sweep.sh` overrides the RTL parameters per run via ORFS `VERILOG_TOP_PARAMS`
+(`chparam -set LANES <n>`), gives each config its own `FLOW_VARIANT` (separate
+results + GDS), and collects area / WNS / power / Fmax into `sweep_results.csv`.
 
-### Place & route — blocked, and why
-
-The intended driver is **bazel-orfs** (`physical/orfs/BUILD.bazel` + `sync.sh`,
-run from `~/bazel-orfs/gallery`). On this machine it does **not** complete: the
-gallery's bzlmod graph pulls a large Python tooling stack (numpy/scipy/pandas/…)
-from PyPI, and the network times out (`Read timed out`), aborting analysis before
-synthesis even starts. There is also no standalone OpenROAD binary installed
-(`tools/install` is empty; the only `openroad` in the bazel cache is a wrapper
-script, not an ELF). So floorplan/place/route/GDS — and therefore WNS/TNS,
-wirelength, and power — are **not reproducible here without network access to
-build/fetch OpenROAD**. The Yosys area numbers below are real; the P&R column is
-pending an OpenROAD install.
+There is also a fast, offline **synthesis-only** area pass that needs just Yosys +
+a liberty (no OpenROAD): `physical/orfs/synth_area.sh {sky130hd,nangate45}`.
 
 ---
 
 ## Results
 
-### Synthesis (real, this machine)
+### Synthesis only (Yosys, nangate45) — the area-vs-lanes trade-off
 
-`tinymac_accel`, `LANES=4 ACC_W=24`, flattened, mapped to each PDK's typical
-corner:
+`chparam`-overriding `LANES`, flattened, mapped to NangateOpenCell typical:
 
-| PDK | Node | Std cells | Flip-flops | Cell area |
-|-----|------|-----------|-----------|-----------|
-| **sky130hd** | 130 nm | 10,179 | 231 | **72,897 µm²** |
-| **nangate45** | 45 nm | 12,032 | 231 | **14,518 µm²** |
+| LANES | cells | cell area (µm²) | rel. area | throughput |
+|-------|-------|-----------------|-----------|------------|
+| 1  | 10,094 | 12,331 | 1.00× | 1× |
+| 2  | 10,799 | 13,120 | 1.06× | ~2× |
+| 4  | 12,098 | 14,589 | 1.18× | ~4× |
+| 8  | 14,591 | 17,354 | 1.41× | ~8× |
+| 16 | 19,571 | 22,949 | 1.86× | ~16× |
 
-The 231 flip-flops match the RTL state (accumulator, counters, config, pipeline
-regs). Area is **arithmetic-dominated** — the most common cells are `nand2`,
-`xnor2`, `xor2`, `maj3` (majority/carry), i.e. the MAC multipliers and the 64-bit
-Q31 requantize multiply. That confirms the architectural expectation: the
-multiplier datapath, not control, sets the area, so `LANES` and the requantize
-width are the real area knobs.
+**Key insight:** 1→16 lanes is 16× the multipliers but only **1.86× the area**,
+because the 64-bit requantize multiply + FSM + counters are fixed overhead every
+config pays. More lanes is a *bargain* — you buy throughput cheaply in area.
 
-> Cell area is pre-placement (no routing/whitespace). Post-P&R die area is larger
-> by the placement utilization factor (~40% target → ~2.5× the cell area).
+(sky130hd, `LANES=4`: 10,179 cells / **72,897 µm²** — 130 nm cells are ~5× bigger
+than 45 nm, as expected.)
 
-### Place & route (pending OpenROAD)
+### Full RTL→GDS (classic ORFS make, nangate45, LANES=4 ACC_W=24)
 
-| Metric | sky130hd @ 10 ns | asap7 @ 5 ns |
-|--------|------------------|--------------|
-| WNS / TNS (ns) | pending OpenROAD | pending OpenROAD |
-| Routed wirelength | pending | pending |
-| Power (mW) | pending | pending |
-| GDS | pending | pending |
+First complete layout — `6_final.gds`, viewable in KLayout / the OpenROAD GUI:
 
-To unblock: install OpenROAD (or restore network so bazel-orfs can build it),
-then `physical/orfs/sync.sh` + `bazel build //tinymac:tinymac_accel_final`, or
-point the classic ORFS `make` flow at the binary. The design, SDC, and BUILD are
-all in place and ready to run.
+| Metric | Value | Note |
+|--------|-------|------|
+| Design area | **19,738 µm²** | post-place, 48% utilization |
+| Flip-flops | 231 | matches RTL state |
+| **Fmax** | **~269 MHz** (period_min 3.72 ns) | the real achievable speed |
+| WNS @ 2.0 ns target | **−1.72 ns (VIOLATED)** | 2.0 ns was too aggressive |
+| Setup violations @ 2 ns | 40 | all on the requantize path |
+| Power | ~1.0 W | nangate45 worst-case switching — a *pessimistic upper bound* |
+
+**The critical path is the requantize Q31 multiply**, confirmed by the timing
+report: `i_qmult → full-adder chain → u_rq.q31 → u_rq.shifted → u_rq.biased →
+o_out_data`. It is **independent of `LANES`** (the MAC adder tree is shallower
+than the 32×32 multiply), so Fmax is roughly constant across all lane counts
+while area grows with lanes — a clean latency-vs-area Pareto.
+
+> **Architectural follow-up the report points to:** pipeline the requantize
+> (split the 64-bit multiply across 2 cycles). Requantize runs once per output
+> channel, not per MAC, so this ~doubles Fmax for almost no throughput cost.
+
+### Closing the loop — the optimizer drives the flow (Stage 5 ↔ 6)
+
+The same agents that searched the *simulated* design space (random / evo / ucb /
+bayesian) can now drive the **real** ORFS flow and score measured metrics:
+
+```bash
+# on the VM (real OpenROAD):
+python3 optimizer/run_physical_optimizer.py --agent evo --trials 12
+# offline self-test (no OpenROAD, synthetic-but-plausible metrics):
+PHYSICAL_MOCK=1 python3 optimizer/run_physical_optimizer.py --agent random --trials 6
+```
+
+| Module | Role |
+|--------|------|
+| `optimizer/physical_runner.py` | runs one config through ORFS (reuses `sweep.sh`'s mechanism), parses area/WNS/Fmax/power from the real reports. `lru_cache`d; `PHYSICAL_MOCK=1` for offline tests |
+| `optimizer/physical_reward.py` | reward over **measured** metrics: speedup = behavioral cycles × real achieved clock (`max(clk, 1000/Fmax)`), real area/power, real timing_met. Same weights as the sim reward |
+| `optimizer/physical_env.py` | `PhysicalOptEnv(OptEnv)` — swaps the evaluation, reuses every agent and the search space |
+| `optimizer/run_physical_optimizer.py` | CLI; logs to `results_physical.jsonl` |
+
+Each non-cached trial is a full place-and-route (minutes), so keep trial counts
+modest; distinct configs and already-built variants are cached/reused. This is
+the plan's Stage-5↔6 loop: the agent proposes a chip config, the tools build it,
+the real metrics feed the reward, the agent picks the next one.
+
+> This code was independently reviewed for hallucinated APIs and wrong ORFS
+> assumptions before landing; the report parsers were checked against real VM
+> report strings, and the loop validated end-to-end in mock mode.
+
+### Still to do
+
+- Re-sweep at a **realistic clock** (≈4 ns) so configs meet timing, and/or sweep
+  the clock to map Fmax per config.
+- **asap7** (the project's 7nm-class target) — copy the nangate45 config dir, set
+  `PLATFORM = asap7`, pick a 7 nm-appropriate clock.
+- (Optional) pipeline the requantize multiply to lift Fmax (~2×) — the critical
+  path the timing report identified.

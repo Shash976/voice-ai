@@ -55,7 +55,10 @@ echo "lanes,acc_w,clk_ns,variant,status,area_um2,util_pct,wns_ns,tns_ns,setup_vi
 
 run_one() {
     local lanes="$1" acc="$2" clk="$3"
-    local variant="L${lanes}_A${acc}_c${clk/./p}"
+    # normalise clk to one decimal so the variant name matches the Python
+    # optimizer's (optimizer/physical_runner.py), letting them share built GDS.
+    local clkn; clkn="$(printf '%.1f' "$clk")"
+    local variant="L${lanes}_A${acc}_c${clkn//./p}"
     local cfgdir="$HERE/$PLATFORM/$DESIGN"
     local gen_sdc="$cfgdir/constraint_${variant}.sdc"
     local gen_cfg="$cfgdir/config_${variant}.mk"
