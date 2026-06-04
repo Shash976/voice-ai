@@ -105,12 +105,14 @@ def main() -> None:
     p.add_argument("--agent", choices=list(AGENTS), default="evo")
     p.add_argument("--trials", type=int, default=12)
     p.add_argument("--platform", default="nangate45")
+    p.add_argument("--mode", choices=["full", "proxy"], default="full",
+                   help="full = RTL→GDS (minutes); proxy = synth+STA (seconds, for fast search)")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--space", default=None)
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
-    env = PhysicalOptEnv(search_space_path=args.space, platform=args.platform)
+    env = PhysicalOptEnv(search_space_path=args.space, platform=args.platform, mode=args.mode)
     if args.resume:
         n = env.load_existing_results()
         if n:
@@ -124,7 +126,7 @@ def main() -> None:
         print(f"Agent warm-started from {len(env.history)} records.")
 
     print(f"\n  Physical optimizer | agent={args.agent} trials={args.trials} "
-          f"platform={args.platform}")
+          f"platform={args.platform} mode={args.mode}")
     print(f"  params: {', '.join(env.search_space.keys())}")
     print(f"  results: {PHYS_RESULTS_FILE}\n")
 

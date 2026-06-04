@@ -24,15 +24,25 @@ from pathlib import Path
 
 from env import OptEnv
 from physical_reward import behavioral_cycles, compute_physical_reward
-from physical_runner import run_physical
+from physical_runner import run_physical, run_synth_sta
 
 PHYS_RESULTS_FILE = Path(__file__).parent / "results_physical.jsonl"
 
 
 class PhysicalOptEnv(OptEnv):
-    def __init__(self, search_space_path=None, platform: str = "nangate45") -> None:
+    """Drives the real ORFS flow.  `mode` selects the evaluator:
+      'full'  — full RTL→GDS (minutes/config): real area, routed timing, power.
+      'proxy' — synthesis + pre-layout STA (seconds/config): real gate area +
+                optimistic Fmax, no power.  For fast search; validate finalists
+                with 'full'.
+    """
+
+    def __init__(self, search_space_path=None, platform: str = "nangate45",
+                 mode: str = "full") -> None:
         super().__init__(search_space_path)
         self.platform = platform
+        self.mode = mode
+        self._eval = run_synth_sta if mode == "proxy" else run_physical
         self._results_file = PHYS_RESULTS_FILE
 
     # ── Evaluation ────────────────────────────────────────────────────────────
@@ -44,7 +54,7 @@ class PhysicalOptEnv(OptEnv):
         acc_w = int(config.get("accumulator_width", 24))
         clk   = float(config.get("clock_period_ns", 5))
 
-        metrics = run_physical(lanes, acc_w, clk, self.platform)  # cached per config
+        metrics = self._eval(lanes, acc_w, clk, self.platform)    # cached per config
         cycles  = behavioral_cycles(lanes)
         scored  = compute_physical_reward(metrics, self._reward_cfg, cycles=cycles)
         reward  = scored["reward"]
