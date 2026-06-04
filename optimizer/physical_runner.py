@@ -50,6 +50,14 @@ _LIBERTY = {
     "nangate45": "platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib",
     "sky130hd":  "platforms/sky130hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib",
 }
+# Tech + std-cell LEF (OpenROAD's link_design needs a technology, not just
+# liberty).  Curated — deliberately excludes the SRAM/fakeram macro LEFs.
+_LEF = {
+    "nangate45": ["platforms/nangate45/lef/NangateOpenCellLibrary.tech.lef",
+                  "platforms/nangate45/lef/NangateOpenCellLibrary.macro.lef"],
+    "sky130hd":  ["platforms/sky130hd/lef/sky130_fd_sc_hd.tlef",
+                  "platforms/sky130hd/lef/sky130_fd_sc_hd_merged.lef"],
+}
 # Synth cell area → estimated post-P&R "Design area" inflation (CTS/repair
 # buffers). Calibrated on nangate45 LANES=4: 19738 / 14589 ≈ 1.35.
 _PLACE_INFLATION = 1.35
@@ -253,19 +261,22 @@ def _yosys_synth_script(lanes: int, acc_w: int, lib: Path, netlist: Path) -> str
     ])
 
 
-def _sta_script(lib: Path, netlist: Path, sdc: Path) -> str:
+def _sta_script(lefs: list[Path], lib: Path, netlist: Path, sdc: Path) -> str:
     # Pre-layout STA in OpenROAD: cell delays only (optimistic, no net RC), but
     # fast and — unlike the routed flow — target-clock-independent, so Fmax is a
-    # fair cross-config speed metric.  report_clock_min_period prints the same
-    # "period_min = X fmax = Y" line the full-flow parser already handles.
+    # fair cross-config speed metric.  OpenROAD's link_design needs a technology,
+    # so read the tech + std-cell LEF first.  report_clock_min_period prints the
+    # same "period_min = X fmax = Y" line the full-flow parser already handles.
+    lef_lines = "".join(f"read_lef {lef}\n" for lef in lefs)
     return (
-        f"read_liberty {lib}\n"
-        f"read_verilog {netlist}\n"
-        f"link_design {DESIGN}\n"
-        f"read_sdc {sdc}\n"
-        "report_clock_min_period\n"
-        "report_wns\n"
-        "report_tns\n"
+        lef_lines
+        + f"read_liberty {lib}\n"
+        + f"read_verilog {netlist}\n"
+        + f"link_design {DESIGN}\n"
+        + f"read_sdc {sdc}\n"
+        + "report_clock_min_period\n"
+        + "report_wns\n"
+        + "report_tns\n"
     )
 
 
@@ -291,9 +302,10 @@ def run_synth_sta(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangat
             f"ORFS not found at {ORFS_DIR} (set ORFS_DIR, or PHYSICAL_MOCK=1 to test offline)"
         )
     lib_rel = _LIBERTY.get(platform)
-    if lib_rel is None:
-        raise ValueError(f"no proxy liberty for platform '{platform}' (try nangate45 / sky130hd)")
-    lib = ORFS_DIR / "flow" / lib_rel
+    if lib_rel is None or platform not in _LEF:
+        raise ValueError(f"no proxy lib/lef for platform '{platform}' (try nangate45 / sky130hd)")
+    lib  = ORFS_DIR / "flow" / lib_rel
+    lefs = [ORFS_DIR / "flow" / rel for rel in _LEF[platform]]
 
     gen_cfg = _stage_inputs(platform, variant, lanes, acc_w, clk_ns)   # also writes the SDC
     sdc = gen_cfg.parent / f"constraint_{variant}.sdc"
@@ -304,11 +316,12 @@ def run_synth_sta(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangat
     synth_ys = work / "synth.ys"
     sta_tcl = work / "sta.tcl"
     synth_ys.write_text(_yosys_synth_script(lanes, acc_w, lib, netlist))
-    sta_tcl.write_text(_sta_script(lib, netlist, sdc))
+    sta_tcl.write_text(_sta_script(lefs, lib, netlist, sdc))
 
-    # 1) synthesis (script FILE, not -p, to avoid shell-quoting issues)
+    # 1) synthesis (script FILE, not -p, to avoid shell-quoting issues; no -q,
+    #    which would suppress the `stat` output we parse).
     p1 = subprocess.run(
-        ["bash", "-c", f"source '{env_sh}' && yosys -q '{synth_ys}'"],
+        ["bash", "-c", f"source '{env_sh}' && yosys '{synth_ys}'"],
         cwd=str(MAKE_DIR), capture_output=True, text=True, timeout=PROXY_TIMEOUT,
     )
     (work / "synth.log").write_text((p1.stdout or "") + "\n--- stderr ---\n" + (p1.stderr or ""))
