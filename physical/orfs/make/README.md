@@ -11,6 +11,7 @@ physical/orfs/make/                    ← run from here (the working dir)
 ├── run.sh                             ← stages RTL + invokes the ORFS Makefile
 ├── nangate45/tinymac_accel/           ← config.mk + constraint.sdc (2.0 ns)
 ├── sky130hd/tinymac_accel/            ← config.mk + constraint.sdc (10 ns)
+├── asap7/tinymac_accel/               ← config.mk + constraint.sdc (1.0 ns) — the plan's target PDK
 └── src/tinymac_accel/                 ← RTL, auto-staged from ../../../rtl/accel
 ```
 
@@ -74,10 +75,21 @@ reward function instead of brute-forcing the whole grid.
 
 ## Targeting asap7 (the project's real PDK)
 
-Copy `nangate45/tinymac_accel/` to `asap7/tinymac_accel/`, set `PLATFORM = asap7`
-in its `config.mk`, and set a 7nm-appropriate `clk_period` in its
-`constraint.sdc` (ASAP7 cell delays are small — start near the Stage-5 target and
-read back WNS). Then `./run.sh asap7`.
+The `asap7/tinymac_accel/` config now exists (`PLATFORM = asap7`, `clk_period`
+1.0 ns — see the note in its `constraint.sdc`). Just run it:
+
+```bash
+cd physical/orfs/make
+./run.sh asap7              # full flow → GDS
+./run.sh asap7 synth        # stop after synthesis (quick area check)
+./sweep.sh asap7            # LANES/ACC_W grid on asap7
+```
+
+ASAP7 cell delays are small, so the first run will report a Fmax in the GHz
+range; read `period_min`/`fmax` from `reports/asap7/tinymac_accel/base/6_finish.rpt`
+and re-tighten `clk_period` toward it. ASAP7 is the most fragile of the open PDKs
+(see the plan's "ASAP7 caveats") — if a stage fails, fall back to the nangate45
+flow, which is known-good to GDS.
 
 ## Notes / gotchas
 

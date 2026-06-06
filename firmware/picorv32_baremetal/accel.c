@@ -1,6 +1,7 @@
 /* accel.c — Firmware driver: writes accelerator registers, triggers, polls done. */
 
 #include "accel.h"
+#include "../tinyengine_port/conv_im2col.h"
 
 static inline void accel_wait(void)
 {
@@ -32,6 +33,23 @@ void accel_conv1d(
     ACCEL_RELU       = (uint32_t)relu;
     ACCEL_CMD        = ACCEL_CMD_CONV1D;  /* triggers operation */
     accel_wait();
+}
+
+/* conv1d via im2col → repeated MATVEC (cmd=1) on the MATVEC-only datapath.
+ * Bit-identical to accel_conv1d / the software conv1d (see conv_im2col.h), but
+ * uses ONLY the matvec operation — exactly what the synthesizable RTL supports.
+ * Trades one cmd=2 op for out_len cmd=1 ops (more register programming), which
+ * is the cost of dropping the dedicated conv engine from hardware. */
+void accel_conv1d_im2col(
+    const int8_t *inp, const int8_t *w, const int32_t *b, int8_t *out,
+    int in_ch, int in_len, int out_ch, int out_len,
+    int kernel, int stride, int pad, int in_zp, int out_zp,
+    const int32_t *q_mult, const int32_t *rshift, int relu)
+{
+    conv1d_im2col(accel_dense, inp, w, b, out,
+                  in_ch, in_len, out_ch, out_len,
+                  kernel, stride, pad, in_zp, out_zp,
+                  q_mult, rshift, relu);
 }
 
 void accel_dense(

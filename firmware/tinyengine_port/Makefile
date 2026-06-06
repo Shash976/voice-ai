@@ -44,6 +44,17 @@ host: test_infer_host
 test_infer_host: $(SRCS_INFER) test_infer_host.c tiny_vad_weights.h tiny_vad_test_vectors.h
 	$(CC_HOST) $(CFLAGS_HOST) -o $@ $(SRCS_INFER) test_infer_host.c
 
+# ── im2col conv-lowering test ─────────────────────────────────────────────────
+# Verifies the im2col conv→MATVEC path (conv_im2col.h) is bit-exact with the
+# direct conv1d — i.e. the MATVEC-only RTL datapath can run the conv layers.
+
+.PHONY: im2col
+im2col: test_im2col_host
+	./test_im2col_host
+
+test_im2col_host: $(SRCS_INFER) test_im2col_host.c conv_im2col.h tiny_vad_weights.h tiny_vad_test_vectors.h
+	$(CC_HOST) $(CFLAGS_HOST) -o $@ $(SRCS_INFER) test_im2col_host.c
+
 # ── RV32 firmware object ─────────────────────────────────────────────────────
 # Produces tiny_vad_infer.o ready to link into PicoRV32 firmware.
 
@@ -82,4 +93,5 @@ tiny_vad_test_vectors.h:
 
 .PHONY: clean
 clean:
-	rm -f test_infer_host test_infer_host.exe tiny_vad_infer_rv32.o
+	rm -f test_infer_host test_infer_host.exe \
+	      test_im2col_host test_im2col_host.exe tiny_vad_infer_rv32.o

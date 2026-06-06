@@ -143,6 +143,33 @@ static void global_avg_pool(
  * Input/output are flat 1D vectors — no layout ambiguity.
  * Weight layout: w[out_dim * in] → w[o * in + i]
  */
+/* Pure-software matrix-vector kernel (no hook indirection). Exposed so the
+ * im2col conv lowering (conv_im2col.h) and host tests can reuse the exact same
+ * arithmetic as the dense path. Signature matches tinyvad_dense_fn. */
+void tinyvad_dense_sw(
+    const int8_t  *inp,
+    const int8_t  *w,
+    const int32_t *b,
+    int8_t        *out,
+    int in, int out_dim,
+    int in_zp, int out_zp,
+    const int32_t *q_mult,
+    const int32_t *rshift,
+    int relu)
+{
+    for (int o = 0; o < out_dim; o++) {
+        int32_t acc = b[o];
+        for (int i = 0; i < in; i++) {
+            int32_t x  = (int32_t)inp[i] - in_zp;
+            int32_t wv = (int32_t)w[o * in + i];
+            acc += x * wv;
+        }
+        int32_t r = requantize(acc, q_mult[o], rshift[o]) + out_zp;
+        if (relu && r < out_zp) r = out_zp;
+        out[o] = clamp_i8(r);
+    }
+}
+
 static void dense(
     const int8_t  *inp,
     const int8_t  *w,
@@ -160,17 +187,8 @@ static void dense(
                            q_mult, rshift, relu);
         return;
     }
-    for (int o = 0; o < out_dim; o++) {
-        int32_t acc = b[o];
-        for (int i = 0; i < in; i++) {
-            int32_t x  = (int32_t)inp[i] - in_zp;
-            int32_t wv = (int32_t)w[o * in + i];
-            acc += x * wv;
-        }
-        int32_t r = requantize(acc, q_mult[o], rshift[o]) + out_zp;
-        if (relu && r < out_zp) r = out_zp;
-        out[o] = clamp_i8(r);
-    }
+    tinyvad_dense_sw(inp, w, b, out, in, out_dim,
+                     in_zp, out_zp, q_mult, rshift, relu);
 }
 
 /* ── Public inference function ───────────────────────────────────────────────

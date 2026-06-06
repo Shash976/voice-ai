@@ -34,6 +34,12 @@ CFLAGS = \
     -I. \
     -I../tinyengine_port
 
+# Optional: lower conv layers to im2col + MATVEC so the conv work runs on the
+# MATVEC-only RTL datapath instead of the behavioral CONV1D op.  make CONV_IM2COL=1
+ifeq ($(CONV_IM2COL),1)
+CFLAGS += -DACCEL_CONV_IM2COL
+endif
+
 LDFLAGS = -T linker.ld -Wl,--gc-sections -no-pie -Wl,--build-id=none
 
 SRCS = startup.S \

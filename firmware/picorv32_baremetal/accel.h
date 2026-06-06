@@ -49,6 +49,14 @@ void accel_conv1d(
     int kernel, int stride, int pad, int in_zp, int out_zp,
     const int32_t *q_mult, const int32_t *rshift, int relu);
 
+/* Same as accel_conv1d but lowers the layer to im2col + repeated MATVEC, so the
+ * MATVEC-only RTL accelerator can run conv layers. Drop-in tinyvad_conv1d_fn. */
+void accel_conv1d_im2col(
+    const int8_t *inp, const int8_t *w, const int32_t *b, int8_t *out,
+    int in_ch, int in_len, int out_ch, int out_len,
+    int kernel, int stride, int pad, int in_zp, int out_zp,
+    const int32_t *q_mult, const int32_t *rshift, int relu);
+
 void accel_dense(
     const int8_t *inp, const int8_t *w, const int32_t *b, int8_t *out,
     int in, int out_dim, int in_zp, int out_zp,

@@ -94,6 +94,13 @@ typedef void (*tinyvad_dense_fn)(
 extern tinyvad_conv1d_fn tinyvad_conv1d_hook;
 extern tinyvad_dense_fn  tinyvad_dense_hook;
 
+/* Pure-software matrix-vector kernel (matches tinyvad_dense_fn). Exposed for the
+ * im2col conv lowering in conv_im2col.h and for host correctness tests. */
+void tinyvad_dense_sw(
+    const int8_t *inp, const int8_t *w, const int32_t *b, int8_t *out,
+    int in, int out_dim, int in_zp, int out_zp,
+    const int32_t *q_mult, const int32_t *rshift, int relu);
+
 /* ── Public API ─────────────────────────────────────────────────────────────── */
 
 /*

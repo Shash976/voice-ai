@@ -22,8 +22,15 @@
 
 int main(void)
 {
-    /* Route conv1d and dense layers to the hardware accelerator */
+    /* Route conv1d and dense layers to the hardware accelerator.
+     * With -DACCEL_CONV_IM2COL (make CONV_IM2COL=1) conv layers are lowered to
+     * im2col + MATVEC, exercising the MATVEC-only RTL datapath; otherwise the
+     * behavioral CONV1D op (cmd=2) is used. */
+#ifdef ACCEL_CONV_IM2COL
+    tinyvad_conv1d_hook = accel_conv1d_im2col;
+#else
     tinyvad_conv1d_hook = accel_conv1d;
+#endif
     tinyvad_dense_hook  = accel_dense;
 
     uart_puts("vec,label,result,correct,logit0,logit1,cycles\n");
