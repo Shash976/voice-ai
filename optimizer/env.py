@@ -24,7 +24,9 @@ RESULTS_FILE = Path(__file__).parent / "results.jsonl"
 
 
 def _load_yaml(path: str | Path) -> dict:
-    with open(path) as f:
+    # encoding pinned: the search-space YAMLs contain non-ASCII (µm², ×, →) and
+    # Windows' default cp1252 would crash on them (UnicodeDecodeError).
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 

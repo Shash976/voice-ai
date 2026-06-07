@@ -63,10 +63,21 @@ _LEF = {
 _PLACE_INFLATION = 1.35
 
 
-def variant_name(lanes: int, acc_w: int, clk_ns: float) -> str:
+def variant_name(lanes: int, acc_w: int, clk_ns: float,
+                 util: int = 40, density: float = 0.60, abc: str | None = None) -> str:
     # clk formatted to one decimal so int/float inputs collapse to one name and
     # it matches sweep.sh's variant naming (which normalises the same way).
-    return f"L{lanes}_A{acc_w}_c{f'{float(clk_ns):.1f}'.replace('.', 'p')}"
+    name = f"L{lanes}_A{acc_w}_c{f'{float(clk_ns):.1f}'.replace('.', 'p')}"
+    # Flow-param suffixes are appended ONLY when non-default, so configs that use
+    # the original util=40/density=0.60 keep the exact old variant name and reuse
+    # any GDS already built by run.sh / sweep.sh.
+    if util != 40:
+        name += f"_u{util}"
+    if abs(float(density) - 0.60) > 1e-9:
+        name += f"_d{f'{float(density):.2f}'.replace('.', 'p')}"
+    if abc:
+        name += f"_{abc}"
+    return name
 
 
 # ── Report parsing ────────────────────────────────────────────────────────────
@@ -143,7 +154,12 @@ def _parse_metrics(work: Path, platform: str, variant: str, clk_ns: float) -> di
 
 # ── ORFS config generation (mirrors sweep.sh) ─────────────────────────────────
 
-def _config_mk(platform: str, variant: str, lanes: int, acc_w: int) -> str:
+def _config_mk(platform: str, variant: str, lanes: int, acc_w: int,
+               util: int = 40, density: float = 0.60, abc: str | None = None) -> str:
+    # CORE_UTILIZATION / PLACE_DENSITY are written as hard assignments (not ?=)
+    # so the swept value is authoritative for this variant. ABC_AREA=1 switches
+    # Yosys mapping to area-minimisation (smaller, slower) when abc == "area".
+    abc_line = "export ABC_AREA = 1\n" if abc == "area" else ""
     return (
         "export DESIGN_HOME = .\n"
         f"export DESIGN_NAME = {DESIGN}\n"
@@ -152,14 +168,16 @@ def _config_mk(platform: str, variant: str, lanes: int, acc_w: int) -> str:
         "                       $(DESIGN_HOME)/src/$(DESIGN_NAME)/int8_mac_array.v \\\n"
         "                       $(DESIGN_HOME)/src/$(DESIGN_NAME)/requantize.v\n"
         f"export SDC_FILE      = $(DESIGN_HOME)/{platform}/$(DESIGN_NAME)/constraint_{variant}.sdc\n"
-        "export CORE_UTILIZATION      ?= 40\n"
-        "export PLACE_DENSITY          ?= 0.60\n"
+        f"export CORE_UTILIZATION      = {util}\n"
+        f"export PLACE_DENSITY          = {density}\n"
+        f"{abc_line}"
         "export SYNTH_REPEATABLE_BUILD ?= 1\n"
         f"export VERILOG_TOP_PARAMS = LANES {lanes} ACC_W {acc_w}\n"
     )
 
 
-def _stage_inputs(platform: str, variant: str, lanes: int, acc_w: int, clk_ns: float) -> Path:
+def _stage_inputs(platform: str, variant: str, lanes: int, acc_w: int, clk_ns: float,
+                  util: int = 40, density: float = 0.60, abc: str | None = None) -> Path:
     """Copy RTL into the work tree and write the per-variant config.mk + SDC.
     Returns the path to the generated config.mk."""
     cfgdir = MAKE_DIR / platform / DESIGN
@@ -181,26 +199,32 @@ def _stage_inputs(platform: str, variant: str, lanes: int, acc_w: int, clk_ns: f
     )
 
     gen_cfg = cfgdir / f"config_{variant}.mk"
-    gen_cfg.write_text(_config_mk(platform, variant, lanes, acc_w))
+    gen_cfg.write_text(_config_mk(platform, variant, lanes, acc_w, util, density, abc))
     return gen_cfg
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
 @lru_cache(maxsize=None)
-def run_physical(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangate45") -> dict:
+def run_physical(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangate45",
+                 util: int = 40, density: float = 0.60, abc: str | None = None) -> dict:
     """Run the full RTL→GDS flow for one config and return parsed metrics.
 
-    Deterministic for a fixed RTL + PDK, so memoised.  Reuses an already-built
-    variant (skips the flow if its 6_final.gds exists).
+    Deterministic for a fixed RTL + PDK + flow params, so memoised.  Reuses an
+    already-built variant (skips the flow if its 6_final.gds exists).
+
+    util / density / abc are ORFS flow knobs (CORE_UTILIZATION, PLACE_DENSITY,
+    ABC_AREA); at their defaults (40, 0.60, None) the variant name is identical
+    to run.sh/sweep.sh so previously-built GDSs are reused.
 
     Returns a dict with: lanes, acc_w, clk_ns, platform, variant, status,
     area_um2, util_pct, wns_ns, tns_ns, setup_viol, power_mw, fmax_mhz,
     period_min_ns, timing_met, gds, report.
     """
-    variant = variant_name(lanes, acc_w, clk_ns)
+    variant = variant_name(lanes, acc_w, clk_ns, util, density, abc)
     base = {"lanes": lanes, "acc_w": acc_w, "clk_ns": float(clk_ns),
-            "platform": platform, "variant": variant}
+            "platform": platform, "variant": variant,
+            "core_utilization": util, "place_density": density, "abc": abc}
 
     if os.environ.get("PHYSICAL_MOCK"):
         return {**base, "status": "mock", **_mock_metrics(lanes, acc_w, clk_ns)}
@@ -211,7 +235,7 @@ def run_physical(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangate
             f"ORFS not found at {ORFS_DIR} (set ORFS_DIR, or PHYSICAL_MOCK=1 to test offline)"
         )
 
-    gen_cfg = _stage_inputs(platform, variant, lanes, acc_w, clk_ns)
+    gen_cfg = _stage_inputs(platform, variant, lanes, acc_w, clk_ns, util, density, abc)
     gds = MAKE_DIR / "results" / platform / DESIGN / variant / "6_final.gds"
 
     status = "ok"
@@ -238,6 +262,50 @@ def run_physical(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangate
     if status == "ok" and metrics.get("report") is None:
         status = "FAIL"          # flow claimed success but produced no report
     return {**base, "status": status, **metrics}
+
+
+# ── Gate 2: RTL elaboration check (Yosys hierarchy, ~1-2 s) ────────────────────
+
+@lru_cache(maxsize=None)
+def run_elaborate(lanes: int, acc_w: int, platform: str = "nangate45") -> dict:
+    """Cheap structural gate: does the parameterised RTL elaborate cleanly?
+
+    Reads the Verilog, applies the LANES/ACC_W chparams (exactly as ORFS will),
+    builds the hierarchy and runs Yosys `check`. Catches parameter combinations
+    that don't elaborate BEFORE paying for synthesis/STA/P&R. Seconds, not minutes.
+
+    Returns {"ok": bool, "stage": "elaborate", "log": <path or note>}.
+    """
+    if os.environ.get("PHYSICAL_MOCK"):
+        # The current RTL elaborates for any positive LANES/ACC_W; model that.
+        ok = lanes >= 1 and acc_w >= 1
+        return {"ok": ok, "stage": "elaborate", "log": "mock"}
+
+    env_sh = ORFS_DIR / "env.sh"
+    if not env_sh.exists():
+        raise FileNotFoundError(
+            f"ORFS not found at {ORFS_DIR} (set ORFS_DIR, or PHYSICAL_MOCK=1 to test offline)"
+        )
+
+    rtl = " ".join(str(RTL_DIR / f) for f in RTL_FILES)
+    work = MAKE_DIR / "elaborate" / variant_name(lanes, acc_w, 1.0)
+    work.mkdir(parents=True, exist_ok=True)
+    ys = work / "elaborate.ys"
+    ys.write_text("\n".join([
+        f"read_verilog -sv {rtl}",
+        f"chparam -set LANES {lanes} {DESIGN}",
+        f"chparam -set ACC_W {acc_w} {DESIGN}",
+        f"hierarchy -check -top {DESIGN}",
+        "proc",
+        "check -assert",
+        "",
+    ]))
+    p = subprocess.run(
+        ["bash", "-c", f"source '{env_sh}' && yosys '{ys}'"],
+        cwd=str(MAKE_DIR), capture_output=True, text=True, timeout=PROXY_TIMEOUT,
+    )
+    (work / "elaborate.log").write_text((p.stdout or "") + "\n--- stderr ---\n" + (p.stderr or ""))
+    return {"ok": p.returncode == 0, "stage": "elaborate", "log": str(work / "elaborate.log")}
 
 
 # ── Fast proxy: Yosys synthesis + OpenROAD STA (no place & route) ──────────────

@@ -1,0 +1,119 @@
+# search_space_full.yaml — EXPANDED design space for the cascade optimizer.
+#
+# This is the big-space counterpart to search_space.yaml (the original 45-config
+# space).  It adds real, measurable knobs and many more options per knob, and is
+# consumed by the multi-fidelity CASCADE optimizer (run_cascade_optimizer.py),
+# which screens configs through cheap gates before paying for full place-and-route.
+#
+# RULE OF THE PROJECT: every axis here has a real measurement path. Adding a knob
+# that no tool responds to would be "guessing performance". Each param below is
+# wired to either the Verilator sim, Yosys synthesis, or the OpenROAD flow.
+#
+#   sim_params   → fed to the Verilator binary (cycle-accurate): mac_lanes, acc_w
+#   proxy_params → fed to Yosys/OpenROAD config.mk + SDC: clock, util, density, abc
+#
+# Total space ≈ 9 × 5 × 10 × 6 × 5 × 2 = 27,000 configs (vs 45 before) — far too
+# many to enumerate, which is the whole point of the screening funnel.
+
+sim_params:
+  mac_lanes:
+    type: categorical
+    choices: [1, 2, 3, 4, 6, 8, 12, 16, 32]
+    default: 4
+    flag: "--mac-lanes"
+    description: "Parallel int8 MAC lanes. Per-layer latency = ceil(MACs/lanes). RTL: chparam LANES."
+
+  accumulator_width:
+    type: categorical
+    choices: [16, 20, 24, 28, 32]
+    default: 24
+    flag: "--acc-width"
+    description: >
+      Accumulator bit-width (RTL: chparam ACC_W). Saturates per accumulate step,
+      so a too-narrow accumulator yields hardware-accurate WRONG outputs. The sim
+      gate measures real correctness: <24 bits drops TinyVAD accuracy (int16=47/64).
+
+proxy_params:
+  clock_period_ns:
+    type: categorical
+    choices: [0.5, 0.7, 1.0, 1.3, 1.7, 2.0, 2.5, 3.0, 5.0, 10.0]
+    default: 2.0
+    description: "Target clock period (ns), written into the SDC. Drives Fmax target + timing."
+
+  core_utilization:
+    type: categorical
+    choices: [20, 30, 40, 50, 60, 70]
+    default: 40
+    description: "ORFS CORE_UTILIZATION (%). Denser = smaller die but harder to route."
+
+  place_density:
+    type: categorical
+    choices: [0.45, 0.55, 0.60, 0.65, 0.75]
+    default: 0.60
+    description: "ORFS PLACE_DENSITY target. Trades area for routability/timing."
+
+  abc_strategy:
+    type: categorical
+    choices: ["speed", "area"]
+    default: "speed"
+    description: "Synthesis mapping objective. 'area' sets ORFS ABC_AREA=1 (smaller, slower)."
+
+# ── Validity constraints (gate 1: validate) ──────────────────────────────────
+# Declarative boolean expressions over the param names. A config is VALID only if
+# every expression is True. Evaluated by validate.py in a restricted namespace
+# (no builtins). Add a rule here and the funnel enforces it automatically — no
+# code change. These reject combos that are illegal or known-infeasible BEFORE
+# any tool runs (microseconds), so the agent learns to avoid dead regions cheaply.
+constraints:
+  - "clock_period_ns > 0"
+  - "0 < place_density <= 0.8"
+  - "20 <= core_utilization <= 70"
+  - "mac_lanes <= 32"
+  # Known routing-infeasible corner: very high utilization AND very high density
+  # together over-pack the core and reliably fail detailed routing.
+  - "not (core_utilization >= 70 and place_density >= 0.75)"
+  # Past ~the largest matvec K (TinyVAD im2col Conv0 K=200), extra lanes are pure
+  # waste; cap the searched lane count well below that so the agent doesn't chase
+  # area with no latency benefit.
+  - "mac_lanes <= 32"
+
+# ── Funnel gate thresholds (cascade.py) ──────────────────────────────────────
+# Each gate's pass/fail criteria. A config that fails a gate is rejected with the
+# corresponding stage penalty (see reward.stage_penalty) and skips all remaining
+# (more expensive) gates.
+gates:
+  sim:
+    # Verilator behavioral run: reject functionally-broken configs cheaply.
+    min_accuracy: 0.95          # fraction of the 64 vectors that must stay correct
+  proxy:
+    # Synth + pre-layout STA (seconds): coarse area/speed screen before P&R.
+    max_area_um2: 80000.0       # reject obviously-too-big synth area (die estimate)
+    require_timing_met: false   # pre-layout timing is optimistic; let full P&R judge
+  full:
+    # No extra gate — the multi-objective reward over real PPA is the final score.
+    require_timing_met: false
+
+# ── Reward function ──────────────────────────────────────────────────────────
+# Same multi-objective weights as the other tracks (so results are comparable),
+# PLUS stage_penalty: the reward assigned when a config dies at a given gate.
+# Penalties escalate with how cheap the rejection was — an instantly-invalid
+# config is the worst use of a trial slot only in that it teaches the agent to
+# avoid that region; it costs ~0 wall-clock. A config that wasted a full P&R and
+# still failed is scored on its real (poor) metrics, not a flat penalty.
+reward:
+  w_accuracy:          2.0
+  w_speedup:           3.0
+  w_area:             -0.4
+  w_power:            -0.4
+  w_timing_violation: -3.0
+  max_speedup:        576.0
+  min_useful_speedup:  10.0
+  perf_floor_penalty:  -8.0
+
+  # Reward floor for configs rejected at each gate (cheaper rejection → more
+  # negative, so the agent prefers configs that at least progress).
+  stage_penalty:
+    invalid:    -100.0   # failed validate (illegal params)
+    elaborate:   -80.0   # RTL did not elaborate with these params
+    sim:         -60.0   # functionally wrong (e.g. accumulator too narrow)
+    proxy:       -40.0   # synth/STA screen failed (too big / unsynthesizable)

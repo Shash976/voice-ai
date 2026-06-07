@@ -201,4 +201,63 @@ results.jsonl  (one record per trial)  ──> dashboard.py / run summary table
   needs bigger/noisier spaces.
 - Quickest demo: `benchmark_agents.py` + `test_reward_sanity.py` (Windows, no sim).
 
+---
+
+## The cascade optimizer — a bigger space + a screening funnel
+
+The 45-config space above is fully enumerable, so search can't beat brute force.
+The **cascade optimizer** ([`../optimizer/run_cascade_optimizer.py`](../optimizer/run_cascade_optimizer.py))
+exists for the *opposite* regime: a much larger space where most configs are bad
+and full evaluation is expensive.
+
+### Bigger space — [`../optimizer/search_space_full.yaml`](../optimizer/search_space_full.yaml)
+
+Six real, measurable axes (~27,000 configs):
+
+| Param | Values | Wired to |
+|-------|--------|----------|
+| `mac_lanes` | 1,2,3,4,6,8,12,16,32 | RTL chparam LANES (sim + synth) |
+| `accumulator_width` | 16,20,24,28,32 | RTL chparam ACC_W (sim correctness) |
+| `clock_period_ns` | 0.5 … 10.0 (10 values) | SDC clock |
+| `core_utilization` | 20 … 70 | ORFS `CORE_UTILIZATION` |
+| `place_density` | 0.45 … 0.75 | ORFS `PLACE_DENSITY` |
+| `abc_strategy` | speed, area | ORFS `ABC_AREA` |
+
+Adding a knob still requires wiring it to a real tool (every axis above is) —
+the project rule "score real results, don't guess" still holds. The flow knobs
+are plumbed through `physical_runner._config_mk`; `validate.py` enforces the
+declarative `constraints:` block, and gate thresholds live under `gates:`.
+
+### The funnel (multi-fidelity, early rejection)
+
+Each config is pushed through gates cheapest → most expensive
+([`../optimizer/cascade.py`](../optimizer/cascade.py)); the first failure
+short-circuits the rest, so a full place-and-route only runs on survivors:
+
+```
+validate  (µs)   legality + declarative constraints        validate.py
+elaborate (~s)   Yosys reads the parameterised RTL          run_elaborate
+sim       (~s)   Verilator: real correctness + cycles       runner.run_sim
+proxy     (s–m)  Yosys synth + OpenROAD STA: area + Fmax     run_synth_sta
+full      (min)  full RTL→GDS: real area/timing/power        run_physical
+```
+
+The reward ([`../optimizer/cascade_reward.py`](../optimizer/cascade_reward.py))
+gives an escalating penalty for early death (`stage_penalty` in the YAML) and the
+full multi-objective PPA reward for survivors — fed to the **same** agents
+(random/evo/ucb/bayesian), so they steer toward configs that reach deep.
+
+```bash
+python optimizer/run_cascade_optimizer.py --agent evo --trials 30        # full funnel
+python optimizer/run_cascade_optimizer.py --max-stage proxy --trials 80  # fast: no P&R
+python optimizer/run_cascade_optimizer.py --platform asap7
+PHYSICAL_MOCK=1 python optimizer/test_cascade.py                         # offline self-test (20 checks)
+```
+
+The run prints **funnel attrition** (how many configs reached each stage) so you
+see where bad configs die — e.g. `acc_width<24` is killed at the cheap `sim` gate,
+never wasting a P&R.
+
+---
+
 Next: [05_commands_cheatsheet.md](05_commands_cheatsheet.md).
