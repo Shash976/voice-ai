@@ -94,14 +94,23 @@ python optimizer/test_reward_sanity.py   # 13/13 reward-function invariants
 
 🐧 **WSL — live optimizer** (needs sim_picorv32 + firmware.bin built first):
 ```bash
+python3 optimizer/run_optimizer.py --agent enumerate # exhaustive 45-config sweep — recommended
 python3 optimizer/run_optimizer.py                   # evo, 30 trials (default)
-python3 optimizer/run_optimizer.py --agent random    # baseline
+python3 optimizer/run_optimizer.py --agent random    # random baseline
 python3 optimizer/run_optimizer.py --agent ucb       # UCB1 bandit
-python3 optimizer/run_optimizer.py --agent bayesian  # Optuna TPE (needs optuna)
+python3 optimizer/run_optimizer.py --agent bayesian  # Optuna TPE (needs: pip install optuna)
 python3 optimizer/run_optimizer.py --agent evo --trials 50
 python3 optimizer/run_optimizer.py --resume          # continue previous run (appends to results.jsonl)
 python3 optimizer/run_optimizer.py --dry-run         # print configs, skip the sim
 python3 optimizer/runner.py 16 32                    # run one sim config directly (lanes acc_width)
+```
+
+**Cascade optimizer** — larger ~27 K-config space with multi-fidelity funnel:
+```bash
+python3 optimizer/run_cascade_optimizer.py --agent evo --trials 30        # full funnel (slow — runs P&R)
+python3 optimizer/run_cascade_optimizer.py --max-stage proxy --trials 80  # proxy only (Yosys + STA, no P&R)
+python3 optimizer/run_cascade_optimizer.py --platform asap7               # switch target PDK
+PHYSICAL_MOCK=1 python optimizer/test_cascade.py                          # offline self-test, 20 checks
 ```
 
 Live dashboard (separate terminal):
@@ -111,11 +120,42 @@ streamlit run optimizer/dashboard.py
 
 ---
 
-## 5. Stage 6 — RTL → GDS  🔜 NOT STARTED
+## 5. Stage 6 — RTL → GDS  🚧 GDS produced
 
-`rtl/accel/int8_mac_array.v` is an **empty placeholder**. No commands exist yet —
-this stage means *writing* the synthesizable Verilog and running it through
-OpenROAD-flow-scripts (ORFS) targeting ASAP7. See doc 00 / the plan for scope.
+RTL is written (`rtl/accel/`), bit-exact-verified, and a full nangate45 GDS has been
+produced via the classic ORFS make flow on the company VM
+(`/opt/OpenROAD-flow-scripts`). Numbers: LANES=4 ACC_W=24 → ~19,738 µm², ~269 MHz
+Fmax, 231 FFs. See `docs/06_rtl_to_gds.md` for details.
+
+**RTL unit tests** (Verilator, runs anywhere):
+```bash
+cd rtl/tb
+make               # LANES=4 ACC_W=24 — expect 45/45 PASS
+make ACC_W=32      # also bit-exact
+make LANES=8       # more parallelism
+make clean
+```
+
+**Synthesis-only area sweep** (Yosys, no OpenROAD needed):
+```bash
+bash physical/orfs/synth_area.sh nangate45   # sweeps LANES 1–16, prints cell area table
+bash physical/orfs/synth_area.sh sky130hd    # same for sky130
+```
+
+**Full RTL→GDS** (company VM only — needs `/opt/OpenROAD-flow-scripts`):
+```bash
+physical/orfs/make/run.sh                    # nangate45, LANES=4, single config
+physical/orfs/make/run.sh nangate45 gui_final  # + open OpenROAD GUI after route
+physical/orfs/make/sweep.sh                  # sweeps LANES={1,2,4,8,16}, → sweep_results.csv
+```
+
+**Physical optimizer** — agents driving the real ORFS flow:
+```bash
+# On the VM (real OpenROAD):
+python3 optimizer/run_physical_optimizer.py --agent evo --trials 12
+# Offline self-test (no OpenROAD, PHYSICAL_MOCK=1):
+PHYSICAL_MOCK=1 python3 optimizer/run_physical_optimizer.py --agent random --trials 6
+```
 
 ---
 
@@ -124,11 +164,16 @@ OpenROAD-flow-scripts (ORFS) targeting ASAP7. See doc 00 / the plan for scope.
 | Command | Healthy result |
 |---------|----------------|
 | `./test_infer_host` | all vectors pass, max error ≤ 2 LSB |
-| `make run` (accel on) | `correct=64/64 avg_cycles=~58577` |
-| `./sim_picorv32 ... --mac-lanes 16` | `correct=64/64`, ~43K cycles |
+| `make run` (accel on, 8 lanes) | `correct=64/64 avg_cycles≈58–66K`¹ |
+| `./sim_picorv32 ... --mac-lanes 16` | `correct=64/64`, ~43–49K cycles¹ |
 | `./sim_picorv32 ... --acc-width 16` | `correct=47/64` (overflow, expected) |
 | `benchmark_agents.py` | "No agent meaningfully beats random search" |
 | `test_reward_sanity.py` | 13/13 checks pass |
+| `cd rtl/tb && make` | `45/45 PASS  0 mismatches` |
+| `synth_area.sh nangate45` | LANES=1: ~12.3K µm² → LANES=16: ~22.9K µm² |
+
+¹ Cycle counts pending WSL rebuild with the updated cycle model (`ACCEL_CH_OVERHEAD=2`,
+~12.5% higher than old `ceil(M·K/LANES)` formula). Re-pin with `measure_real.py` after.
 
 ---
 
@@ -146,5 +191,11 @@ OpenROAD-flow-scripts (ORFS) targeting ASAP7. See doc 00 / the plan for scope.
    doc 02's build-flag section.
 6. **`runner.py` can't find the sim** → build it in WSL first:
    `cd sim/verilator && make`.
-7. **Looking for the accelerator's Verilog** → it doesn't exist yet; the accelerator
-   is the C++ behavioral model in `sim/verilator/sim_main.cpp` (`accel_execute()`).
+7. **Yosys assertion `genrtlil.cc:2214`** → signed/unsigned mixing in RTL. No
+   `$signed()` on unsigned whole-wires, no signed `integer` params in unsigned
+   exprs, no mixed-sign `?:` branches. Verilator lint won't catch this.
+8. **`run.sh` / `sweep.sh` fails to find OpenROAD** → these scripts require the
+   company VM at `/opt/OpenROAD-flow-scripts`. Synthesis-only (`synth_area.sh`)
+   needs only Yosys and runs anywhere.
+9. **Physical optimizer runs real P&R in tests** → set `PHYSICAL_MOCK=1`; never
+   invoke `run_physical_optimizer.py` without it in a test or CI context.

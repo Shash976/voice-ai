@@ -75,6 +75,28 @@ SW_BASELINE_CYCLES      = 11_196_638
 SW_BASELINE_CLOCK_NS    = 10.0                              # 100 MHz
 SW_BASELINE_LATENCY_NS  = SW_BASELINE_CYCLES * SW_BASELINE_CLOCK_NS
 
+# ── Critical-path model, calibrated to the REAL Stage-6 GDS (2026-06-08) ───────
+# The earlier model (2.5 + 0.15·lanes + 0.05·acc_bytes) was an uncalibrated
+# ASAP7 *guess* that grew with lanes.  The first real nangate45 GDS of
+# tinymac_accel (docs/06_rtl_to_gds.md) measured the opposite:
+#
+#   * Fmax ≈ 269 MHz  →  period_min = 3.72 ns  at LANES=4, ACC_W=24.
+#   * The critical path is the requantize Q31 64-bit multiply
+#     (i_qmult → adder chain → u_rq.q31 → … → o_out_data), NOT the MAC array.
+#   * It is INDEPENDENT OF LANES: the MAC adder tree is shallower than the
+#     32×32 multiply, so Fmax is roughly constant across all lane counts while
+#     area grows with lanes — a clean area↑ / Fmax-flat Pareto.
+#
+# So we model the path as a requantize-dominated constant anchored to the
+# measured 3.72 ns point, plus a small ACC_W term (the Q31 multiplicand is the
+# ACC_W-bit accumulator value, so a wider accumulator widens the multiply a
+# little).  There is deliberately NO lanes term — the measured path does not
+# move with lanes.  Re-anchor _CRIT_NS_AT_REF if a future GDS re-sweep at a
+# realistic clock changes the measured period.
+_CRIT_REF_ACC_W   = 24      # ACC_W of the measured reference config
+_CRIT_NS_AT_REF   = 3.72    # measured period_min (ns) at the reference config
+_CRIT_NS_PER_BIT  = 0.02    # extra ns per accumulator bit beyond the reference
+
 
 # ── Proxy computations ────────────────────────────────────────────────────────
 
@@ -116,21 +138,26 @@ def power_proxy(config: dict, area: float | None = None) -> float:
 
 def critical_path_ns(config: dict) -> float:
     """
-    Estimated combinational critical path of the MAC datapath (ns).
+    Estimated combinational critical path of the accelerator (ns), calibrated to
+    the real Stage-6 GDS (see the _CRIT_* constants above).
 
-    Critical path model (calibrated for ASAP7 7 nm):
-      2.5 ns base adder + 0.15 ns routing per lane + 0.05 ns per acc register byte.
+    The path is the requantize Q31 multiply, which is INDEPENDENT OF LANES and
+    requantize-dominated.  Modelled as a constant anchored to the measured
+    3.72 ns (at ACC_W=24) plus a small per-bit term for the ACC_W-wide
+    multiplicand:
 
-    Examples:
-      16 lanes, 32b acc:  2.5 + 2.40 + 0.20 = 5.10 ns
-       8 lanes, 32b acc:  2.5 + 1.20 + 0.20 = 3.90 ns
+        critical_path_ns = 3.72 + 0.02 · (acc_width − 24)
+
+    Examples (vs the OLD lanes-growing guess, which was wrong):
+       4 lanes, 24b acc:  3.72            (measured reference — GDS period_min)
+      16 lanes, 24b acc:  3.72            (LANES-independent; old guess said 5.05)
+       8 lanes, 32b acc:  3.72 + 0.16 = 3.88
 
     Shared helper: timing_slack_ns() and the effective-clock computation in
     env.step both derive from this, so the timing model is single-sourced.
     """
-    lanes = config["mac_lanes"]
     acc_w = config.get("accumulator_width", 32)
-    return 2.5 + 0.15 * lanes + 0.05 * (acc_w / 8)
+    return round(_CRIT_NS_AT_REF + _CRIT_NS_PER_BIT * (acc_w - _CRIT_REF_ACC_W), 3)
 
 
 def timing_slack_ns(config: dict) -> float:
@@ -138,9 +165,10 @@ def timing_slack_ns(config: dict) -> float:
     Timing slack = clock_period − critical_path  (ns).
     Positive → timing met; negative → violation (chip won't work at this clock).
 
-    At 16 lanes, 32b acc, 5 ns clock: slack = 5 − 5.10 = −0.1 ns  ← violation
-    At  8 lanes, 32b acc, 5 ns clock: slack = 5 − 3.90 =  1.1 ns  ← just OK
-    At  8 lanes, 32b acc, 10 ns clock: slack = 10 − 3.90 = 6.1 ns ← comfortable
+    With the GDS-calibrated, LANES-independent path (≈3.72 ns at 24b):
+    At any lanes, 24b acc, 5 ns clock:  slack = 5 − 3.72 = 1.28 ns ← met (200 MHz < 269 MHz Fmax)
+    At any lanes, 24b acc, 2 ns clock:  slack = 2 − 3.72 = −1.72 ns ← violation (500 MHz > Fmax)
+    At any lanes, 32b acc, 10 ns clock: slack = 10 − 3.88 = 6.12 ns ← comfortable
     """
     clock_ns = config.get("clock_period_ns", 10)
     return round(clock_ns - critical_path_ns(config), 3)

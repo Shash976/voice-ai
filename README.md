@@ -41,8 +41,15 @@ Stage 1–2  TinyVAD: train, quantize to int8, export to C         ✅ complete
 Stage 3    PicoRV32 software baseline in Verilator simulation     ✅ complete
 Stage 4    Behavioral int8 AI accelerator                         ✅ complete
 Stage 5    Design-space optimization (agents + reward + benchmark) ✅ complete
-Stage 6    RTL synthesis → place-and-route → GDS (real chip)      🔜 next
+Stage 6    RTL synthesis → place-and-route → GDS (real chip)      🚧 GDS produced
 ```
+
+**Stage 6 status:** synthesizable accelerator RTL (`rtl/accel/`) written and
+bit-exact-verified against the reference inference, then taken all the way to a
+**nangate45 GDS layout** via OpenROAD-flow-scripts. First real numbers (LANES=4,
+ACC_W=24): ~19,738 µm² die area, ~269 MHz Fmax (requantize-multiply-limited),
+231 flip-flops. A parameter sweep (`physical/orfs/make/sweep.sh`) compares
+LANES configs. See [`docs/06_rtl_to_gds.md`](docs/06_rtl_to_gds.md).
 
 ---
 
@@ -416,7 +423,13 @@ the accelerator deliberately reproduces hardware-accurate overflow, dropping to
 
 ---
 
-## Stage 5 (Next): Design-Space Optimization
+## Stage 5 (✅ complete): Design-Space Optimization
+
+> **Built — see [docs/04_optimizer.md](docs/04_optimizer.md) for the as-implemented
+> details.** It is design-space *exploration* (single-step black-box search), not RL.
+> The 45-config sim grid is fully enumerable (`--agent enumerate` gives the true
+> optimum `{lanes:4, acc:24, clk:5}`); the learning strategies are for the larger
+> cascade space. The original plan below is kept for context.
 
 The behavioral model makes it cheap to try different hardware configurations. `MAC_LANES` is the most obvious knob: 1 lane = sequential, 16 lanes = 16 MACs per cycle. But there are others: accumulator width (int16 vs int32), dataflow strategy (weight-stationary vs output-stationary), buffer sizes.
 
@@ -431,7 +444,11 @@ dataflow:            [output_stationary, weight_stationary]
 
 ---
 
-## Stage 6 (Next): RTL to GDS — Making a Real Chip
+## Stage 6 (🚧 GDS produced): RTL to GDS — Making a Real Chip
+
+> **A full nangate45 GDS already exists** (see the Stage 6 status above and
+> [docs/06_rtl_to_gds.md](docs/06_rtl_to_gds.md)). The explainer below introduces
+> the concepts.
 
 ### What this stage is
 

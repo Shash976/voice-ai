@@ -130,30 +130,32 @@ def main() -> int:
           r5["reward"] > r10["reward"] > r20["reward"],
           f"clk5={r5['reward']}  clk10={r10['reward']}  clk20={r20['reward']}")
 
-    # crit(8,24)=3.85 < 5, so clk=5 already runs at the requested 5 ns (no cap here).
-    # Verify capping where it actually bites: lanes=16,acc=24 has crit=5.05 > 5.
+    # The GDS-calibrated path is LANES-independent ≈3.72 ns (at 24b).  The sim
+    # grid's fastest clock is 5 ns > crit, so nothing is capped on-grid — which
+    # is correct (200 MHz < 269 MHz Fmax).  Verify capping off-grid where it
+    # bites: an aggressive 2 ns request (< crit) must clamp up to the crit path.
     cap_base = {"mac_lanes": 16, "accumulator_width": 24}
     crit_16  = R.critical_path_ns(cap_base)
-    rc5 = evaluate({**cap_base, "clock_period_ns": 5},  reward_cfg)
-    eff5 = rc5["proxies"]["effective_clock_ns"]
+    rc2 = evaluate({**cap_base, "clock_period_ns": 2},  reward_cfg)
+    eff2 = rc2["proxies"]["effective_clock_ns"]
     check("clk below critical path is capped: effective_clock == critical_path",
-          abs(eff5 - round(crit_16, 3)) < 1e-6,
-          f"requested clk=5  crit={crit_16:.3f}  effective={eff5}")
+          abs(eff2 - round(crit_16, 3)) < 1e-6,
+          f"requested clk=2  crit={crit_16:.3f}  effective={eff2}")
 
     print()
 
     # ── (b) clk < crit does NOT out-reward clk == crit (same config) ──────────
     print("(b) Requesting clk < critical_path never beats clk = critical_path:")
-    # Use a config whose critical path lies strictly between choice grid points.
-    # lanes=16, acc=24: crit=5.05.  clk=5 (<crit, violation) vs a hypothetical
-    # clk = crit.  We synthesise the clk=crit config off-grid for the comparison.
+    # crit(16,24) ≈ 3.72 ns.  Compare an aggressive clk=2 ns (< crit → violation)
+    # against clk = crit (the fastest legal clock).  Both are off the {5,10,20}
+    # grid; we synthesise them only to exercise the invariant.
     viol = evaluate({"mac_lanes": 16, "accumulator_width": 24,
-                     "clock_period_ns": 5}, reward_cfg)
+                     "clock_period_ns": 2}, reward_cfg)
     at_crit = evaluate({"mac_lanes": 16, "accumulator_width": 24,
                         "clock_period_ns": round(crit_16, 3)}, reward_cfg)
     check("reward(clk<crit) <= reward(clk=crit)  for same lanes/acc",
           viol["reward"] <= at_crit["reward"],
-          f"clk=5(violation)={viol['reward']}  clk=crit({crit_16:.3f})={at_crit['reward']}")
+          f"clk=2(violation)={viol['reward']}  clk=crit({crit_16:.3f})={at_crit['reward']}")
     check("clk<crit flagged as timing_violation; clk=crit is not",
           viol["proxies"]["timing_violation"] and not at_crit["proxies"]["timing_violation"],
           f"viol.flag={viol['proxies']['timing_violation']}  "

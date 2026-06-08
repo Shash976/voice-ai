@@ -75,29 +75,44 @@ higher power cost and trips the timing-violation penalty. See the long comment a
 - `area_proxy` — MAC array (∝ lanes × acc_width) is 80%, SRAM is a fixed 20%.
   Normalized to **1.0 at the baseline** (8 lanes, 32b).
 - `power_proxy` — `area × clock_frequency`, also 1.0 at baseline.
-- `critical_path_ns` — `2.5 + 0.15·lanes + 0.05·(acc_width/8)` (ASAP7-calibrated
-  guess). E.g. 16 lanes/32b = 5.10 ns → can't run at a 5 ns clock → timing violation.
+- `critical_path_ns` — `3.72 + 0.02·(acc_width − 24)` ns, **calibrated to the real
+  Stage-6 GDS** (was an uncalibrated `2.5 + 0.15·lanes + …` guess). The first
+  nangate45 layout (docs/06) measured the critical path as the requantize Q31
+  multiply at **3.72 ns (Fmax ≈ 269 MHz)**, and crucially **independent of lanes** —
+  the MAC adder tree is shallower than the 32×32 multiply. So more lanes buys
+  throughput without hurting Fmax, and a 5 ns clock (200 MHz) *meets* timing at every
+  lane count. The old guess wrongly grew the path with lanes (16 lanes → 5.10 ns) and
+  fictitiously flagged high-lane configs as timing violations.
 
-These are **estimates**, clearly labeled as such, and become *real* numbers in
-Stage 6 ORFS. The constants (`SW_BASELINE_CYCLES = 11,196,638`, `max_speedup = 576`)
-were pinned empirically — see [`../optimizer/measure_real.py`](../optimizer/measure_real.py)
-and the comments in the YAML/reward derivations.
+The area/power terms remain **estimates**, clearly labeled as such, and become
+*real* numbers in Stage 6 ORFS (the timing term now already is one). The constants
+(`SW_BASELINE_CYCLES = 11,196,638`, `max_speedup = 576`) were pinned empirically —
+see [`../optimizer/measure_real.py`](../optimizer/measure_real.py) and the comments
+in the YAML/reward derivations.
 
 ---
 
 ## The agents — [`../optimizer/agents/`](../optimizer/agents/)
 
-All agents share one interface (`BaseAgent`):
+> **This is design-space exploration (DSE), not reinforcement learning.** Each
+> "agent" picks one full hardware config per trial; the env scores it in a single
+> step (`OptEnv.step` always returns `done=False` — there is no episode, trajectory,
+> or MDP state the agents learn over). The strategies are classic black-box search,
+> not policies. We keep the word "agent" only for the shared `suggest/update`
+> interface; nothing here is RL.
+
+All strategies share one interface (`BaseAgent`):
 
 ```python
 config = agent.suggest(state, history)   # propose next config
-agent.update(config, reward, info)        # learn from the result
+agent.update(config, reward, info)        # record the result
 ```
 
-| Agent | File | Strategy |
-|-------|------|----------|
+| Strategy | File | What it does |
+|----------|------|--------------|
+| `enumerate` | `enumerate_agent.py` | **Exhaustive grid sweep — the correct tool for this 45-config space.** Evaluates every config once, reports the true optimum, zero sampling variance. |
 | `random` | `random_agent.py` | Uniform random sampling — the baseline |
-| `evo` | `evo_agent.py` | (μ+λ) evolutionary search (mutate the best) — the default |
+| `evo` | `evo_agent.py` | (μ+λ) evolutionary search (mutate the best) — the CLI default |
 | `ucb` | `ucb_agent.py` | Factored UCB1 bandit — treats each axis as an independent multi-armed bandit |
 | `bayesian` | `bayesian_agent.py` | Optuna TPE — needs `pip install optuna` (optional) |
 
@@ -126,8 +141,9 @@ UCB actually does slightly *worse*.
 
 This is an **honest, deliberately-reported tie** — not a failure. The lesson: agent
 cleverness only pays off on larger, rougher, noisier, or expensive-to-evaluate
-spaces. On a tiny deterministic grid, just enumerate it. Documenting that honestly is
-the deliverable.
+spaces. On a tiny deterministic grid, just enumerate it — which is exactly what
+`--agent enumerate` does (one pass over all 45 configs, true global optimum, no
+variance). The learning strategies are there for the larger cascade space below.
 
 There's also [`../optimizer/test_reward_sanity.py`](../optimizer/test_reward_sanity.py)
 — 13 offline invariant checks on the reward function (e.g. "a timing-violating config
@@ -150,6 +166,7 @@ These are the quickest way to see Stage 5 work — they need only Python + pyyam
 
 ```bash
 # Prereqs (WSL): build firmware.bin and sim_picorv32 first (see doc 02)
+python3 optimizer/run_optimizer.py --agent enumerate # exhaustive 45-config sweep (recommended here)
 python3 optimizer/run_optimizer.py                  # default: evo, 30 trials
 python3 optimizer/run_optimizer.py --agent random
 python3 optimizer/run_optimizer.py --agent ucb
@@ -197,9 +214,15 @@ results.jsonl  (one record per trial)  ──> dashboard.py / run summary table
 - The reward's headline insight: use **frequency-aware real_speedup**, not raw cycle
   ratio, or the optimizer cheats by picking the slowest clock.
 - Grid optimum: `{lanes:4, acc:24, clk:5}`, reward ≈ 4.01.
-- **No agent beats random on 45 configs** — and that's reported honestly. Agent value
-  needs bigger/noisier spaces.
+- This is **DSE, not RL** — single-step black-box search, no MDP. On 45 configs the
+  honest tool is `--agent enumerate`; **no learning strategy beats random** here.
+  Agent value needs bigger/noisier spaces (the cascade track).
 - Quickest demo: `benchmark_agents.py` + `test_reward_sanity.py` (Windows, no sim).
+- The behavioral sim (`sim_main.cpp`) cycle model was updated to match RTL: latency =
+  `n_outputs × (ceil(K/LANES) + 2)` where `+2` is the per-channel overhead (bias load +
+  requantize). The old `ceil(M·K/LANES)` understated hardware by ~12.5% (FC0: 512 → 576
+  cycles). WSL rebuild needed to propagate to live optimizer runs; re-pin constants with
+  `measure_real.py` afterwards.
 
 ---
 

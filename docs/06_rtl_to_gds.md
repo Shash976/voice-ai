@@ -89,6 +89,11 @@ The ~12.5% gap is the real per-channel control overhead (bias load + requantize
 cycles) that the Stage-4 `ceil(MACs/lanes)` model abstracts away. This is an
 honest Stage-6 finding: the idealized speedup slightly overstates hardware.
 
+**Backported to the behavioral sim.** `sim_main.cpp` now models this overhead
+(`ACCEL_CH_OVERHEAD = 2`): latency = `n_outputs × (ceil(K/LANES) + 2)` instead of
+`ceil(M·K/LANES)`. Rebuild the WSL sim to see updated cycle counts and re-pin the
+optimizer constants with `measure_real.py`.
+
 ---
 
 ## Getting RTL to synthesize: the strict-Yosys signedness gotcha
@@ -215,6 +220,8 @@ the real metrics feed the reward, the agent picks the next one.
 
 ### Still to do
 
+- ~~Backport per-channel cycle overhead to `sim_main.cpp`~~ — **done** (`ACCEL_CH_OVERHEAD=2`
+  in `sim_main.cpp`; rebuild WSL sim + re-run `measure_real.py` to update live numbers).
 - Re-sweep at a **realistic clock** (≈4 ns) so configs meet timing, and/or sweep
   the clock to map Fmax per config.
 - **asap7** (the project's 7nm-class target) — copy the nangate45 config dir, set

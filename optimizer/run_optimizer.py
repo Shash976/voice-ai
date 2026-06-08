@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
-"""run_optimizer.py — TinyMAC RL / agentic design-space optimizer.
+"""run_optimizer.py — TinyMAC accelerator design-space exploration (DSE).
+
+This is multi-objective black-box search over a categorical config grid, NOT
+reinforcement learning: every "agent" picks one full hardware config per trial,
+the env scores it (single step, no episode/MDP state), and the agent proposes
+the next.  The strategies are random / evolutionary / bandit (UCB) / Bayesian
+(TPE).  On the 45-config sim grid the honest, recommended strategy is
+`--agent enumerate`, which evaluates every config exactly once and reports the
+true global optimum (see docs/04_optimizer.md — no learning agent beats brute
+force on a space this small).  The learning agents earn their keep only on the
+larger cascade space (run_cascade_optimizer.py).
 
 Usage
 -----
   # Run from the repo root (WSL):
+  python3 optimizer/run_optimizer.py --agent enumerate      # exhaustive sweep (recommended here)
   python3 optimizer/run_optimizer.py                        # default: evo, 30 trials
   python3 optimizer/run_optimizer.py --agent random         # random search baseline
-  python3 optimizer/run_optimizer.py --agent ucb            # UCB1 bandit (RL)
+  python3 optimizer/run_optimizer.py --agent ucb            # factored UCB1 bandit
   python3 optimizer/run_optimizer.py --agent bayesian       # Optuna TPE
   python3 optimizer/run_optimizer.py --agent evo --trials 50
   python3 optimizer/run_optimizer.py --resume               # continue previous run
@@ -33,6 +44,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from agents.bayesian_agent import BayesianAgent
+from agents.enumerate_agent import EnumerateAgent
 from agents.evo_agent import EvoAgent
 from agents.random_agent import RandomAgent
 from agents.ucb_agent import UCBAgent
@@ -40,6 +52,7 @@ from env import RESULTS_FILE, OptEnv
 from runner import SW_BASELINE_CYCLES
 
 AGENTS = {
+    "enumerate": EnumerateAgent,
     "random":   RandomAgent,
     "evo":      EvoAgent,
     "ucb":      UCBAgent,
@@ -47,10 +60,11 @@ AGENTS = {
 }
 
 _AGENT_DESCRIPTIONS = {
+    "enumerate": "exhaustive grid sweep — the correct tool for this small space",
     "random":   "uniform random sampling (baseline)",
-    "evo":      "(mu+lambda) evolutionary strategy — recommended default",
-    "ucb":      "factored UCB1 bandit — good for small spaces",
-    "bayesian": "Optuna TPE — best sample efficiency (requires: pip install optuna)",
+    "evo":      "(mu+lambda) evolutionary strategy",
+    "ucb":      "factored UCB1 bandit",
+    "bayesian": "Optuna TPE (requires: pip install optuna)",
 }
 
 
@@ -87,7 +101,7 @@ def _print_trial(rec: dict) -> None:
 def _print_header(agent_name: str, n_trials: int, space: dict) -> None:
     print()
     print("┌─────────────────────────────────────────────────────────────────────────┐")
-    print("│ TinyMAC RL / Agentic Design-Space Optimizer                             │")
+    print("│ TinyMAC Accelerator Design-Space Exploration (DSE)                      │")
     print("└─────────────────────────────────────────────────────────────────────────┘")
     print(f"  agent    : {agent_name}  —  {_AGENT_DESCRIPTIONS.get(agent_name, '')}")
     print(f"  trials   : {n_trials}")
@@ -175,8 +189,8 @@ def main() -> None:
         help="Search strategy (default: evo)",
     )
     parser.add_argument(
-        "--trials", type=int, default=30,
-        help="Number of optimizer trials (default: 30)",
+        "--trials", type=int, default=None,
+        help="Number of trials (default: 30; for --agent enumerate, the full grid size)",
     )
     parser.add_argument(
         "--resume", action="store_true",
@@ -202,6 +216,16 @@ def main() -> None:
         env.clear_results()
 
     agent = AGENTS[args.agent](env.search_space)
+
+    # Resolve trial count.  enumerate defaults to exactly one pass over the grid;
+    # everything else keeps the historical default of 30.
+    if args.trials is not None:
+        n_trials = args.trials
+    elif isinstance(agent, EnumerateAgent):
+        n_trials = agent.space_size
+    else:
+        n_trials = 30
+    args.trials = n_trials
 
     # Warm-start the agent with previously observed results so it continues
     # learning rather than starting cold.  (Fixes the broken --resume behaviour

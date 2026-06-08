@@ -120,7 +120,12 @@ static void accel_execute(uint32_t cmd)
     int32_t in_zp  = (int32_t)ar.zp_in;
     int32_t out_zp = (int32_t)ar.zp_out;
     int     relu   = (int)ar.relu;
-    uint64_t total_macs = 0;
+    /* Cycle model is output-stationary: each output channel streams its K-deep
+     * reduction LANES-at-a-time, then spends a fixed overhead loading the bias
+     * and requantizing.  We therefore track outputs and reduction depth
+     * separately (not just total MACs) so the latency matches the real RTL. */
+    uint64_t n_outputs = 0;   /* number of output elements produced */
+    uint64_t reduction = 0;   /* MACs accumulated per output element  */
 
     fprintf(stderr, "[accel] cmd=%u M=%u K=%u in=0x%x wt=0x%x bias=0x%x out=0x%x\n",
             cmd, ar.dim_m, ar.dim_k, ar.in_ptr, ar.wt_ptr, ar.bias_ptr, ar.out_ptr);
@@ -141,7 +146,8 @@ static void accel_execute(uint32_t cmd)
             if (relu && r < out_zp) r = out_zp;
             ram_w8(ar.out_ptr + o, accel_clamp(r));
         }
-        total_macs = (uint64_t)M * K;
+        n_outputs = (uint64_t)M;
+        reduction = (uint64_t)K;
 
     } else if (cmd == 2u) {
         /* ── CONV1D: out[out_len][out_ch] ── */
@@ -171,10 +177,21 @@ static void accel_execute(uint32_t cmd)
                 ram_w8(ar.out_ptr + t * out_ch + oc, accel_clamp(r));
             }
         }
-        total_macs = (uint64_t)out_len * out_ch * in_ch * kern;
+        /* CONV1D lowers to matvec (im2col): one output element per (t, oc),
+         * each reducing over in_ch*kern products. */
+        n_outputs = (uint64_t)out_len * out_ch;
+        reduction = (uint64_t)in_ch * kern;
     }
 
-    uint64_t latency = (total_macs + (uint64_t)mac_lanes - 1) / (uint64_t)mac_lanes;
+    /* Output-stationary latency, calibrated to the real RTL (docs/06_rtl_to_gds.md):
+     *   per output = ceil(reduction / LANES) accumulate cycles + ACCEL_CH_OVERHEAD
+     *                (bias load + requantize), so
+     *   latency = n_outputs * (ceil(reduction / LANES) + ACCEL_CH_OVERHEAD).
+     * The old model — ceil(total_macs / LANES) — ignored the per-channel
+     * overhead and understated hardware by ~12.5% (FC0: 512 vs measured 576). */
+    const uint64_t ACCEL_CH_OVERHEAD = 2;   /* bias load + requantize, per output */
+    uint64_t chunks  = (reduction + (uint64_t)mac_lanes - 1) / (uint64_t)mac_lanes;
+    uint64_t latency = n_outputs * (chunks + ACCEL_CH_OVERHEAD);
     ar.last_cyc   = (uint32_t)latency;
     accel_done_at = cycle_count + latency;
 }

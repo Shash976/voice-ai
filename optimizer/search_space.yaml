@@ -55,7 +55,10 @@ proxy_params:
           critical path is capped (no free reward — see reward.effective_clock_ns).
         - power_proxy (∝ clock_frequency, uses the requested clock)
         - timing_slack (slack = clock_period - critical_path)
-      At 16 lanes + 5 ns: timing violation fires (critical_path = 5.05–5.10 ns > 5 ns).
+      critical_path is GDS-calibrated and LANES-independent (≈3.72 ns at 24b, the
+      requantize Q31 multiply — see reward.critical_path_ns / docs/06).  So a 5 ns
+      clock (200 MHz) MEETS timing at every lane count (Fmax ≈ 269 MHz); a violation
+      only fires for an off-grid clock below the critical path.
 
   # input_buffer_bytes / weight_buffer_bytes were REMOVED from the active search
   # on 2026-06-02.  The behavioral Verilator sim reads directly from main RAM and
@@ -74,7 +77,7 @@ proxy_params:
 #   real_speedup=1.0   →  0.00  (break-even)
 #   real_speedup=10    →  0.36  (perf floor — below this hits −8.0 penalty)
 #   real_speedup=192   →  0.82  (8 lanes @ 10 ns)
-#   real_speedup=514   →  0.98  (16 lanes @ critical-path clock — fastest feasible)
+#   real_speedup=519   →  0.98  (16 lanes @ 5 ns — fastest grid clock; meets timing)
 #
 # Area and power are SECONDARY — the optimizer's primary job is maximising
 # speedup.  Area/power trade off only after speedup is good.
@@ -90,15 +93,19 @@ reward:
   # max_speedup is the log2 denominator for the speedup term.  It must cover the
   # full real_speedup range (frequency-aware), which is LARGER than the old
   # cycle-only range because a sub-10ns clock multiplies throughput.
-  # DERIVATION (2026-06-02, synthetic TinyVAD model avg_cycles ≈ 28000+242000/lanes,
+  # DERIVATION (updated 2026-06-08 for the GDS-calibrated, LANES-independent timing
+  # model; synthetic TinyVAD model avg_cycles ≈ 28000+242000/lanes,
   # SW_BASELINE_LATENCY_NS = 11,196,638 × 10 ns):
   #   max feasible real_speedup = at lanes=16, acc=24 (smallest correct acc),
-  #   effective_clock = max(5, critical_path=5.05) = 5.05 ns:
-  #     latency_ns   = (28000 + 242000/16) × 5.05 = 43125 × 5.05 = 217,781 ns
-  #     real_speedup = 111,966,380 / 217,781 = 514.12×
-  #   max_speedup = ceil(514.12 × 1.12) = 576  (≈12% headroom above the maximum).
-  #   At the maximum, norm_spd = log2(514.12)/log2(576) = 9.006/9.170 = 0.982 (< 1, no clamp).
-  # Re-derive whenever the timing model, SW baseline, or lane set changes.
+  #   effective_clock = max(5, critical_path=3.72) = 5.0 ns:
+  #     latency_ns   = (28000 + 242000/16) × 5.0 = 43125 × 5.0 = 215,625 ns
+  #     real_speedup = 111,966,380 / 215,625 = 519.3×
+  #   At the maximum, norm_spd = log2(519.3)/log2(576) = 9.020/9.170 = 0.984 (< 1, no clamp).
+  #   576 still safely bounds the max (≈11% headroom), so it is kept.  NOTE: once the
+  #   cycle model fix (sim_main.cpp, per-channel +2 overhead) is rebuilt in WSL,
+  #   measured accel cycles rise ~12.5%, lowering max real_speedup further — 576
+  #   becomes only more conservative.  Re-derive (measure_real.py) whenever the
+  #   timing model, SW baseline, cycle model, or lane set changes.
   max_speedup:        576.0
   min_useful_speedup:  10.0   # below 10× real-time speedup the overhead isn't worth the area
   perf_floor_penalty:  -8.0
