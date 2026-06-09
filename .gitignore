@@ -33,3 +33,6 @@ physical/orfs/reports/
 
 # Claude agent worktrees (ephemeral, created by tool)
 .claude/worktrees/
+
+review/
+review.zip

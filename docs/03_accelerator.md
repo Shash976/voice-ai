@@ -20,21 +20,22 @@ looks exactly like writing to RAM — same bus, just a different address range
 
 ---
 
-## ⚠️ Where the accelerator actually lives (important honesty)
+## Where the accelerator actually lives
 
-Right now the accelerator is **NOT Verilog RTL**. It is a **C++ function inside the
-testbench** ([`../sim/verilator/sim_main.cpp`](../sim/verilator/sim_main.cpp),
-`accel_execute()` at line 118). This is the "behavioral model": when the testbench
-sees a memory write into `0x20000000–0x20000FFF`, it runs the MAC math directly in
-C++ and reports a *simulated* cycle latency.
+The Verilator sim still uses a **C++ behavioral model** inside the testbench
+([`../sim/verilator/sim_main.cpp`](../sim/verilator/sim_main.cpp),
+`accel_execute()` at line 118): when the testbench sees a memory write into
+`0x20000000–0x20000FFF`, it runs the MAC math directly in C++ and reports a
+*simulated* cycle latency. This is how Stages 3–5 measure cycle counts.
 
-- [`../rtl/accel/int8_mac_array.v`](../rtl/accel/int8_mac_array.v) **is an empty file
-  (0 bytes)** — it's a placeholder. The real synthesizable RTL is **Stage 6 work that
-  hasn't started**. Don't go looking for hardware that isn't written yet.
-
-Why behavioral first? It lets us validate the firmware interface, the register
-protocol, and measure cycle counts *cheaply*, before committing to slow-to-write,
-slow-to-simulate Verilog. Stage 6 replaces this C++ with real RTL that must match it.
+**Stage 6 has since written the real synthesizable RTL** —
+[`../rtl/accel/int8_mac_array.v`](../rtl/accel/int8_mac_array.v),
+[`../rtl/accel/requantize.v`](../rtl/accel/requantize.v), and
+[`../rtl/accel/tinymac_accel.v`](../rtl/accel/tinymac_accel.v) — and verified it
+bit-exact against the behavioral model (45/45, see `rtl/tb/`). A full nangate45 GDS
+has been produced. The behavioral model in `sim_main.cpp` *remains* the cycle-count
+source for the optimizer; the RTL is the ground truth for area/timing/power.
+See [doc 06](06_rtl_to_gds.md) for RTL details and physical results.
 
 ---
 
@@ -123,12 +124,18 @@ The behavioral model doesn't cycle-step the MAC array; it computes the answer
 instantly in C++ and then *pretends* it took:
 
 ```c
-latency = ceil(total_MACs / mac_lanes)     // sim_main.cpp:177
+// Output-stationary model, calibrated to real RTL (sim_main.cpp):
+chunks  = ceil(reduction / mac_lanes)        // reduction = K (MATVEC) or in_ch*kern (CONV1D)
+latency = n_outputs * (chunks + ACCEL_CH_OVERHEAD)   // ACCEL_CH_OVERHEAD = 2
 accel_done_at = current_cycle + latency
 ```
 
-STATUS reads as busy (1) until the sim cycle reaches `accel_done_at`. So `mac_lanes`
-directly scales the reported speed — exactly the knob Stage 5 sweeps.
+The `+2` overhead per output channel accounts for bias load + requantize cycles — the
+same per-channel overhead measured in the Stage-6 RTL (FC0: 512 idealized → 576 real).
+The old formula was `ceil(total_MACs / mac_lanes)` which ignored this overhead and
+understated hardware latency by ~12.5%. STATUS reads as busy (1) until
+`accel_done_at`. **WSL rebuild needed** to propagate this change to live sim runs;
+re-pin constants with `measure_real.py` after.
 
 - `mac_lanes` is set at runtime via `--mac-lanes N` (default 8). See `sim_main.cpp:47`.
 - `acc_width` is set via `--acc-width N` (16/24/32, default 32). See below.
@@ -184,21 +191,26 @@ Per inference, vs. the Stage-3 SW baseline (11,196,638 cycles):
 
 | | SW only | accel, 8 lanes | accel, 16 lanes |
 |---|---|---|---|
-| Cycles / inference | ~11.2 M | ~58.6 K | ~43.4 K |
-| Time @ 100 MHz | ~112 ms | ~0.59 ms | ~0.43 ms |
+| Cycles / inference | ~11.2 M | ~58–66 K¹ | ~43–49 K¹ |
+| Time @ 100 MHz | ~112 ms | ~0.6 ms | ~0.4 ms |
 | Accuracy | 64/64 | 64/64 | 64/64 |
-| **Speedup** | 1× | **~191×** | **~258×** |
+| **Speedup** | 1× | **~170–191×** ¹ | **~230–258×** ¹ |
+
+¹ Range reflects the cycle model update (`ACCEL_CH_OVERHEAD=2`). Lower bound is the
+new model; upper bound is the old `ceil(MACs/lanes)` formula. Exact numbers will be
+re-pinned after WSL rebuild + `measure_real.py`.
 
 Notice 16 lanes is *not* 2× faster than 8: the convolution/dense work doesn't divide
-evenly, and fixed per-layer overhead dominates at high lane counts. This diminishing
-return is exactly what the Stage-5 optimizer quantifies.
+evenly, and fixed per-channel overhead dominates at high lane counts. This diminishing
+return is exactly what the Stage-5 optimizer quantifies — and the Stage-6 RTL
+confirmed it by measuring 576 cycles (FC0) vs the 512-cycle idealized estimate.
 
 ---
 
 ## Mental model / what to remember
 
-- The accelerator is **C++ behavioral, not RTL** — `int8_mac_array.v` is empty;
-  writing real RTL is Stage 6.
+- The Verilator sim uses a **C++ behavioral model** for cycle counting — the
+  synthesizable RTL lives in `rtl/accel/` and is verified separately (Stage 6).
 - Memory-mapped peripheral: program registers → write CMD to trigger → poll STATUS.
 - The hook pointers in `main.c` are the on/off switch between SW and accelerated.
 - Requantize math is duplicated and must stay identical across SW/accel; `acc=32`

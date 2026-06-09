@@ -86,6 +86,16 @@ times out at the 50M-cycle cap in pure SW — that's expected).
 
 ## 4. Stage 5 — optimizer
 
+There are **two tracks** (see `docs/04_optimizer.md`):
+
+- **`run_optimizer.py`** — the small 45-config space. Runs the Verilator sim for
+  cycles/accuracy and **analytic proxy formulas** for area/power/timing. **Never
+  runs Yosys or OpenROAD — no PDK, no GDS.** Fast.
+- **`run_cascade_optimizer.py`** — the big ~27 K space. A **multi-fidelity funnel**:
+  it simulates (and synth-screens) each config *first*, and only configs that pass
+  every cheap gate reach the expensive full RTL→GDS place-and-route. So a broken or
+  oversized config is thrown out in seconds instead of wasting a multi-minute PDK run.
+
 🪟 **Windows — offline, no sim needed** (quickest Stage-5 demo):
 ```powershell
 python optimizer/benchmark_agents.py     # agent comparison + honest "no agent beats random" verdict
@@ -105,13 +115,30 @@ python3 optimizer/run_optimizer.py --dry-run         # print configs, skip the s
 python3 optimizer/runner.py 16 32                    # run one sim config directly (lanes acc_width)
 ```
 
-**Cascade optimizer** — larger ~27 K-config space with multi-fidelity funnel:
+**Cascade optimizer** — larger ~27 K-config space with the multi-fidelity funnel.
+Each config is pushed through gates cheapest → most expensive, and the **first
+failure short-circuits the rest** so the full PDK flow only runs on survivors:
+
+```
+validate  (µs)   legality + YAML constraints — no tools
+elaborate (~s)   Yosys reads the parameterised RTL
+sim       (~s)   Verilator: correctness + cycles   → reject if accuracy < 0.95 (e.g. acc_w<24)
+proxy     (s–m)  Yosys synth + OpenROAD STA        → reject if synth area > 80,000 µm²
+full      (min)  full RTL→GDS with the PDK         → real area / timing / power → reward
+```
+
 ```bash
-python3 optimizer/run_cascade_optimizer.py --agent evo --trials 30        # full funnel (slow — runs P&R)
-python3 optimizer/run_cascade_optimizer.py --max-stage proxy --trials 80  # proxy only (Yosys + STA, no P&R)
+python3 optimizer/run_cascade_optimizer.py --agent evo --trials 30        # full funnel (slow — reaches GDS)
+python3 optimizer/run_cascade_optimizer.py --max-stage proxy --trials 80  # stop at synth+STA (no P&R/GDS)
+python3 optimizer/run_cascade_optimizer.py --max-stage sim --trials 200   # stop after the sim gate (fastest screen)
 python3 optimizer/run_cascade_optimizer.py --platform asap7               # switch target PDK
 PHYSICAL_MOCK=1 python optimizer/test_cascade.py                          # offline self-test, 20 checks
 ```
+
+The run prints **funnel attrition** (how many configs reached each gate), so you can
+see where bad configs die — e.g. `acc_width<24` is killed at the cheap `sim` gate and
+never wastes a place-and-route. `--max-stage` caps how deep the funnel goes (handy to
+screen many configs without paying for GDS).
 
 Live dashboard (separate terminal):
 ```bash

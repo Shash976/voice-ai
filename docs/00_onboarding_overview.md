@@ -34,7 +34,7 @@ Stage 1–2  TinyVAD: train in PyTorch, quantize to int8, export to C    ✅ don
 Stage 3    Run it on a simulated RISC-V CPU (PicoRV32 in Verilator)    ✅ done
 Stage 4    Add a hardware MAC accelerator (behavioral C++ model)       ✅ done
 Stage 5    Auto-search the accelerator's design knobs (the optimizer)  ✅ done
-Stage 6    RTL → GDS: turn it into a real chip layout (OpenROAD/ASAP7)  🔜 not started
+Stage 6    RTL → GDS: turn it into a real chip layout (OpenROAD/ASAP7)  🚧 GDS produced
 ```
 
 Each stage feeds the next. The doc map below tells you which file to read for each.
@@ -45,6 +45,7 @@ Each stage feeds the next. The doc map below tells you which file to read for ea
 | 3 | PicoRV32 CPU, bare-metal firmware, the Verilator simulator | [02_firmware_and_simulation.md](02_firmware_and_simulation.md) |
 | 4 | The memory-mapped MAC accelerator + its firmware driver | [03_accelerator.md](03_accelerator.md) |
 | 5 | The Python design-space optimizer (agents + reward + benchmark) | [04_optimizer.md](04_optimizer.md) |
+| 6 | Synthesizable RTL, Verilator correctness gate, ORFS → GDS, physical metrics | [06_rtl_to_gds.md](06_rtl_to_gds.md) |
 | — | Every command in one place | [05_commands_cheatsheet.md](05_commands_cheatsheet.md) |
 
 The authoritative long-form plan is [`../pocket_ai_voice_recorder_riscv_tinyml_plan.md`](../pocket_ai_voice_recorder_riscv_tinyml_plan.md).
@@ -77,8 +78,8 @@ edit in the WSL copy. Keep them in sync with git.
 │ C:\...\voiceAI              │  git   │ ~/voiceAI  (separate clone)     │
 │  • train_tiny_vad.py        │ <────> │  • firmware cross-compile       │
 │  • convert_to_tflite.py     │  sync  │  • sim/verilator (Verilator)    │
-│  • export_weights.py        │        │  • Stage 6 OpenROAD (future)    │
-│  • optimizer/ (Python)      │        │                                 │
+│  • export_weights.py        │        │  • rtl/tb (RTL unit tests)      │
+│  • optimizer/ (Python)      │        │  • physical/orfs (OpenROAD/GDS) │
 └─────────────────────────────┘        └─────────────────────────────────┘
 ```
 
@@ -131,7 +132,11 @@ train_tiny_vad.py
                       ▼
                 optimizer/  (sweeps accelerator configs, ranks them)
                       ▼
-                Stage 6: write real RTL → OpenROAD → GDS   (not started)
+                rtl/accel/  (synthesizable Verilog: int8_mac_array, requantize, tinymac_accel)
+                      │  rtl/tb/ Verilator unit TB  (45/45 bit-exact vs SW golden)
+                      ▼
+                physical/orfs/make/  → OpenROAD-flow-scripts → GDS
+                      (LANES=4 ACC_W=24: ~19,738 µm², ~269 MHz Fmax, 231 FFs)
 ```
 
 Two headers are **generated** and marked "do not edit":
@@ -161,16 +166,30 @@ See [05_commands_cheatsheet.md](05_commands_cheatsheet.md) for every command.
 
 ## Key results to know (so the numbers mean something)
 
-All figures are **per inference** (one audio chunk):
+**Behavioral sim figures** (per inference, one audio chunk):
 
 | Configuration | Cycles / inference | Time @ 100 MHz | Speedup | Correct |
 |---|---|---|---|---|
 | Stage 3 — pure software (no accelerator) | ~11.2 M | ~112 ms | 1× (baseline) | 64/64 |
-| Stage 4 — accelerator, 8 MAC lanes | ~58.6 K | ~0.59 ms | **~191×** | 64/64 |
-| Stage 4 — accelerator, 16 MAC lanes | ~43.4 K | ~0.43 ms | **~258×** | 64/64 |
+| Stage 4 — accelerator, 8 MAC lanes | ~58–66 K¹ | ~0.6 ms | **~170–191×** ¹ | 64/64 |
+| Stage 4 — accelerator, 16 MAC lanes | ~43–49 K¹ | ~0.4 ms | **~230–258×** ¹ | 64/64 |
 
-The ~191× jump is the entire point of the accelerator: a dedicated MAC array does
-in parallel what the CPU does one multiply at a time.
+¹ Cycle model updated to match RTL (per-channel overhead; WSL rebuild pending — re-pin
+with `measure_real.py` to get exact current numbers).
+
+**Stage 6 physical results** (nangate45, synthesized + placed + routed, LANES=4 ACC_W=24):
+
+| Metric | Value |
+|--------|-------|
+| Die area | ~19,738 µm² (48% utilization) |
+| Flip-flops | 231 |
+| Fmax | **~269 MHz** (period_min 3.72 ns) |
+| Critical path | requantize Q31 multiply — independent of LANES |
+| Area vs lanes | 1×→16× MACs costs only 1.86× area (fixed overhead dominates) |
+
+The ~191× behavioral speedup plus the physical numbers together answer the key
+question: a dedicated MAC array is fast (few hundred µs/inference) and small
+(~20 K µm² at 45 nm), making the always-on chip feasible.
 
 ---
 
@@ -190,8 +209,13 @@ in parallel what the CPU does one multiply at a time.
 - **MAC** — Multiply-ACcumulate, the `a*b + acc` operation that dominates neural nets.
 - **Requantization** — after accumulating int8×int8 into int32, scaling the result
   back down to int8 for the next layer (fixed-point multiply + shift).
-- **GDS / GDSII** — the final chip-layout file a fab uses to make masks. Stage 6's goal.
+- **GDS / GDSII** — the final chip-layout file a fab uses to make masks. Stage 6's output.
 - **ORFS** — OpenROAD-flow-scripts; runs the whole RTL→GDS pipeline. Stage 6.
 - **ASAP7** — an academic 7nm process design kit (cell library) for realistic
-  area/timing estimates.
-```
+  area/timing estimates. The project's target PDK; nangate45 is used first (easier).
+- **nangate45** — an open 45 nm PDK used for development/validation before asap7.
+- **Fmax** — maximum operating frequency; the reciprocal of the critical path delay.
+- **WNS / TNS** — worst/total negative slack: how much timing is violated at a given
+  clock target. Negative = design won't work at that clock.
+- **DSE** — design-space exploration: searching over hardware configs to find the best
+  tradeoff. What the optimizer currently does. Distinct from RL (see `AGENTS.md`).

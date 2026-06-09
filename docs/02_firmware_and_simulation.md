@@ -179,7 +179,8 @@ The simulator caps at **50 million cycles** (`MAX_CYCLES` in `sim_main.cpp:36`).
 (~716M cycles) **blows past the cap and times out**. That's expected. The Stage-3
 baseline is therefore read **per inference** — e.g. vec 0 ≈ `11,196,638` cycles —
 not from a completed full run. With the accelerator on (Stage 4), each inference is
-~58K cycles, so the full sweep finishes comfortably.
+~58–66 K cycles (exact figure pending WSL rebuild with updated cycle model), so the
+full sweep finishes comfortably within the cap.
 
 ---
 
@@ -188,7 +189,7 @@ not from a completed full run. With the accelerator on (Stage 4), each inference
 Every one of TinyVAD's ~242K multiply-accumulates runs as **individual RISC-V
 instructions** — load input, load weight, multiply (PicoRV32's multiply is
 multi-cycle), add, loop bookkeeping, repeat. No parallelism, no special hardware.
-That's the baseline the accelerator must beat. It does — by ~191× (doc 03).
+That's the baseline the accelerator must beat. It does — by ~170–191× depending on lane count (doc 03).
 
 ---
 
