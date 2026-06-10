@@ -36,3 +36,8 @@ physical/orfs/reports/
 
 review/
 review.zip
+
+*.mk
+*.sdc
+*.jsonl
+
