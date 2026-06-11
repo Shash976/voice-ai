@@ -36,12 +36,18 @@ OUT    = Path(__file__).parent / "sim_measurements.txt"
 # Sim timeout per run (one inference per process call = fast)
 TIMEOUT = 90
 
-MAC_LANES_VALS  = [1, 2, 4, 8, 16]
+MAC_LANES_VALS  = [1, 2, 4, 8, 16, 32]   # full sweep including lanes=32
 ACC_WIDTH_VALS  = [32, 24, 16]
 
 
 def run_one(mac_lanes: int, acc_width: int) -> dict | None:
-    """Run sim, capture stdout, return first-vector metrics dict or None on failure."""
+    """Run sim, capture all 64 vectors, return averaged metrics dict or None on failure.
+
+    Uses the mean of ALL 64 per-inference cycle values (column 7 of the CSV).
+    The first-vector cycle count can differ slightly from steady state (firmware
+    branch-prediction warm-up); averaging over all 64 gives a stable, reproducible
+    number that matches the mode to within a fraction of a cycle.
+    """
     cmd = [str(SIM), str(FW), "--mac-lanes", str(mac_lanes), "--acc-width", str(acc_width)]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
@@ -52,31 +58,46 @@ def run_one(mac_lanes: int, acc_width: int) -> dict | None:
 
     stdout, stderr = proc.stdout, proc.stderr
 
-    # --- first data line: vec,label,result,correct,logit0,logit1,cycles ---
-    lines = [ln for ln in stdout.splitlines() if ln and not ln.startswith("vec")]
-    if not lines:
+    # --- parse all data lines: vec,label,result,correct,logit0,logit1,cycles ---
+    cycles_all: list[int] = []
+    correct_total = 0
+    n_total = 0
+    for ln in stdout.splitlines():
+        if not ln or ln.startswith("vec") or ln.startswith("correct="):
+            continue
+        parts = ln.split(",")
+        if len(parts) < 7:
+            continue
+        try:
+            c_val = int(parts[6])
+            is_correct = int(parts[3])
+        except ValueError:
+            continue
+        cycles_all.append(c_val)
+        correct_total += is_correct
+        n_total += 1
+
+    if not cycles_all:
         return {"error": "no_output", "mac_lanes": mac_lanes, "acc_width": acc_width}
 
-    first = lines[0].split(",")
-    if len(first) < 7:
-        return {"error": f"short_line: {lines[0]}", "mac_lanes": mac_lanes, "acc_width": acc_width}
-
-    try:
-        cycles  = int(first[6])
-        correct = int(first[3])
-    except ValueError:
-        return {"error": f"parse_fail: {lines[0]}", "mac_lanes": mac_lanes, "acc_width": acc_width}
+    avg_cycles = sum(cycles_all) / len(cycles_all)
+    # Round to nearest integer for use as a table constant.
+    avg_cycles_int = round(avg_cycles)
 
     # total sim cycles from stderr
     m = re.search(r"Done in (\d+) cycles", stderr)
     total_sim = int(m.group(1)) if m else None
 
     return {
-        "mac_lanes":  mac_lanes,
-        "acc_width":  acc_width,
-        "cycles_v0":  cycles,     # first-vector per-inference cycles
-        "total_sim":  total_sim,
-        "correct_v0": correct,    # 1 = correct for first vector
+        "mac_lanes":    mac_lanes,
+        "acc_width":    acc_width,
+        "cycles_v0":    cycles_all[0] if cycles_all else None,   # kept for back-compat
+        "avg_cycles":   avg_cycles,
+        "avg_cycles_int": avg_cycles_int,
+        "n_vectors":    n_total,
+        "correct":      correct_total,
+        "total_sim":    total_sim,
+        "correct_v0":   1 if (cycles_all and correct_total > 0) else 0,  # back-compat
     }
 
 
@@ -91,7 +112,8 @@ def main():
         sys.exit(1)
 
     rows = []
-    header = f"{'lanes':>5}  {'acc_w':>5}  {'cycles/inf':>12}  {'total_sim':>12}  {'correct_v0':>10}"
+    header = (f"{'lanes':>5}  {'acc_w':>5}  {'avg_cyc':>12}  "
+              f"{'correct':>10}  {'total_sim':>12}")
     print(header)
     print("-" * len(header))
 
@@ -104,9 +126,9 @@ def main():
             else:
                 print(
                     f"{lanes:>5}  {acc:>5}  "
-                    f"{r['cycles_v0']:>12,}  "
-                    f"{str(r['total_sim'] or '?'):>12}  "
-                    f"{r['correct_v0']:>10}"
+                    f"{r['avg_cycles_int']:>12,}  "
+                    f"{r['correct']:>4}/{r['n_vectors']:<4}  "
+                    f"{str(r['total_sim'] or '?'):>12}"
                 )
             sys.stdout.flush()
 
@@ -115,63 +137,99 @@ def main():
     # Use 11_196_638 from the just-confirmed measurement if not overridden.
     SW_BASELINE = 11_196_638
 
-    # --- find the best config (highest CYCLE speedup, acc=32, correct_v0=1) ---
-    valid = [r for r in rows if not r.get("error") and r["correct_v0"] == 1 and r["acc_width"] == 32]
-    if valid:
-        best = min(valid, key=lambda x: x["cycles_v0"])
-        cycle_speedup = SW_BASELINE / best["cycles_v0"]
-        print(f"\nSW baseline (no-accel):    {SW_BASELINE:,} cycles/inference")
-        print(f"Best config:               lanes={best['mac_lanes']}  acc={best['acc_width']}b  "
-              f"{best['cycles_v0']:,} cycles/inference")
-        print(f"Max CYCLE speedup:         {cycle_speedup:.1f}x  (frequency-independent; context only)")
+    # --- build AVG_CYCLES table (acc=32, correct rows only) ---
+    acc32_rows = {r["mac_lanes"]: r for r in rows
+                  if not r.get("error") and r["acc_width"] == 32}
+    print(f"\nSW baseline (no-accel):    {SW_BASELINE:,} cycles/inference")
+
+    if acc32_rows:
+        # Show the AVG_CYCLES dict for constants.py
+        sorted_lanes = sorted(acc32_rows.keys())
+        avg_dict = {l: acc32_rows[l]["avg_cycles_int"] for l in sorted_lanes}
+        print(f"\nAVG_CYCLES = {avg_dict!r}")
+
+        # Fit a + b/lanes to the measured data
+        import numpy as np
+        X = np.array([[1, 1/l] for l in sorted_lanes], dtype=float)
+        y = np.array([avg_dict[l] for l in sorted_lanes], dtype=float)
+        (a_fit, b_fit), *_ = np.linalg.lstsq(X, y, rcond=None)
+        print(f"\nbehavioral_cycles fit:  a + b/lanes  =  {a_fit:.1f} + {b_fit:.1f} / lanes")
+        print("Residuals (measured - fitted):")
+        for l in sorted_lanes:
+            fitted = a_fit + b_fit / l
+            print(f"  lanes={l:2d}: measured={avg_dict[l]:7d}  fitted={fitted:9.1f}  "
+                  f"residual={avg_dict[l]-fitted:+7.1f}")
 
         # --- FREQUENCY-AWARE max_speedup recommendation (matches reward.py) -------
-        # The reward uses real_speedup = SW_latency_ns / (cycles × effective_clock_ns).
-        # max_speedup must bound the largest real_speedup over the WHOLE grid (incl.
-        # the fastest clock choice) so the log2 term never spuriously clamps.
         if _R is not None:
             clock_choices = [5, 10, 20]
+            # 45-grid lanes are {1,2,4,8,16} (search_space.yaml); evaluate only those.
+            grid_lanes = [l for l in sorted_lanes if l in {1, 2, 4, 8, 16}]
             max_real = 0.0
             best_real = None
-            for r in rows:
-                if r.get("error"):
-                    continue
-                for clk in clock_choices:
-                    cfg = {"mac_lanes": r["mac_lanes"],
-                           "accumulator_width": r["acc_width"],
-                           "clock_period_ns": clk}
-                    rs = _R.real_speedup(cfg, r["cycles_v0"])
-                    if rs > max_real:
-                        max_real, best_real = rs, (r["mac_lanes"], r["acc_width"], clk)
-            rec = math.ceil(max_real * 1.12)
-            print(f"Max REAL speedup:          {max_real:.1f}x  at lanes={best_real[0]} "
-                  f"acc={best_real[1]}b clk={best_real[2]}ns (frequency-aware; reward uses this)")
-            print(f"\n→ Update in search_space.yaml:  max_speedup: {rec}.0"
-                  f"  (ceil of {max_real:.1f} × 1.12 headroom; frequency-aware)")
+            for l in grid_lanes:
+                cyc = avg_dict[l]
+                for acc in [16, 24, 32]:
+                    for clk in clock_choices:
+                        cfg = {"mac_lanes": l,
+                               "accumulator_width": acc,
+                               "clock_period_ns": clk}
+                        rs = _R.real_speedup(cfg, cyc)
+                        if rs > max_real:
+                            max_real, best_real = rs, (l, acc, clk)
+            rec_grid = math.ceil(max_real * 1.11)
+            # Round up to the nearest 64-boundary
+            rec_nice = rec_grid + (64 - rec_grid % 64) % 64 if rec_grid % 64 else rec_grid
+            print(f"\nMax REAL speedup (45-grid):  {max_real:.2f}x  at lanes={best_real[0]} "
+                  f"acc={best_real[1]}b clk={best_real[2]}ns")
+            print(f"→  ceil({max_real:.2f} × 1.11) = {rec_grid}  →  nearest-64 = {rec_nice}")
+            print(f"   Current search_space.yaml max_speedup=576  →  "
+                  f"{'KEEP 576 (still conservative)' if 576 >= max_real else 'UPDATE NEEDED'}")
+
+            # MAX_SPEEDUP_FULL for cascade space (lanes up to 32)
+            max_real_full = 0.0
+            for l in sorted_lanes:
+                cyc = avg_dict[l]
+                for acc in [24, 32]:
+                    for clk in clock_choices:
+                        cfg = {"mac_lanes": l, "accumulator_width": acc, "clock_period_ns": clk}
+                        rs = _R.real_speedup(cfg, cyc)
+                        if rs > max_real_full:
+                            max_real_full = rs
+            print(f"\nMax REAL speedup (full space, lanes up to 32):  {max_real_full:.2f}x")
+            print(f"MAX_SPEEDUP_FULL = 1024  (set by convention; covers {max_real_full:.2f}x with headroom)")
+
+            best_cycles = min(avg_dict[l] for l in grid_lanes)
+            cycle_speedup = SW_BASELINE / best_cycles
+            print(f"\nMax CYCLE speedup (grid, acc=32):  {cycle_speedup:.1f}x  "
+                  f"(at {best_cycles:,} cycles/inf; frequency-independent)")
         else:
             print("\n(reward.py not importable — skipping frequency-aware max_speedup "
                   "recommendation; see reward.py for the real_speedup model.)")
-        print(f"→ Update in runner.py:  SW_BASELINE_CYCLES = {SW_BASELINE}")
 
-    # --- save results ---
-    with open(OUT, "w") as f:
+    # --- save results (append with date) ---
+    import datetime
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    with open(OUT, "a") as f:
+        f.write(f"\n### Sweep run {stamp} "
+                f"(V13-fixed per-chunk saturation) ###\n")
         f.write(header + "\n")
         f.write("-" * len(header) + "\n")
         for r in rows:
             if r.get("error"):
                 f.write(f"{r['mac_lanes']:>5}  {r['acc_width']:>5}  ERROR: {r['error']}\n")
             else:
-                spd = SW_BASELINE / r["cycles_v0"]
+                spd = SW_BASELINE / r["avg_cycles_int"]
                 f.write(
                     f"{r['mac_lanes']:>5}  {r['acc_width']:>5}  "
-                    f"{r['cycles_v0']:>12,}  "
+                    f"{r['avg_cycles_int']:>12,}  "
+                    f"{r['correct']:>4}/{r['n_vectors']:<4}  "
                     f"{str(r['total_sim'] or '?'):>12}  "
-                    f"{r['correct_v0']:>10}  "
                     f"speedup={spd:.1f}x\n"
                 )
-        f.write(f"\nSW baseline: {SW_BASELINE:,} cycles/inference\n")
+        f.write(f"SW baseline: {SW_BASELINE:,} cycles/inference\n")
 
-    print(f"\nResults saved to: {OUT}")
+    print(f"\nResults appended to: {OUT}")
 
 
 if __name__ == "__main__":

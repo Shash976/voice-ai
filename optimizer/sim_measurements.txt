@@ -17,3 +17,26 @@ lanes  acc_w    cycles/inf     total_sim  correct_v0
    16     16        43,447       2886879           1  speedup=257.7x
 
 SW baseline: 11,196,638 cycles/inference
+
+### Sweep run 2026-06-10 19:02 (V13-fixed per-chunk saturation) ###
+lanes  acc_w       avg_cyc     correct     total_sim
+----------------------------------------------------
+    1     32       273,130    64/64        17558557  speedup=41.0x
+    1     24       273,130    64/64        17558557  speedup=41.0x
+    1     16       273,130    47/64        17559288  speedup=41.0x
+    2     32       152,140    64/64         9815197  speedup=73.6x
+    2     24       152,140    64/64         9815197  speedup=73.6x
+    2     16       152,140    48/64         9815924  speedup=73.6x
+    4     32        91,650    64/64         5938832  speedup=122.2x
+    4     24        91,650    64/64         5938832  speedup=122.2x
+    4     16        91,650    48/64         5939421  speedup=122.2x
+    8     32        61,400    64/64         4002832  speedup=182.4x
+    8     24        61,400    64/64         4002832  speedup=182.4x
+    8     16        61,400    48/64         4003278  speedup=182.4x
+   16     32        46,670    64/64         3060112  speedup=239.9x
+   16     24        46,670    64/64         3060112  speedup=239.9x
+   16     16        46,670    48/64         3060558  speedup=239.9x
+   32     32        39,310    64/64         2589072  speedup=284.8x
+   32     24        39,310    64/64         2589072  speedup=284.8x
+   32     16        39,310    58/64         2588890  speedup=284.8x
+SW baseline: 11,196,638 cycles/inference
