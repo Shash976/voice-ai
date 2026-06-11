@@ -37,8 +37,22 @@ the agents driving it are still the same black-box strategies — they receive h
 reward for configs that reach deeper funnel stages, but they do not learn a *policy*
 over trajectories.
 
-**Do not re-label the existing agents as RL.** The codebase documents this distinction
-deliberately and carefully. Introducing misleading terminology will be reverted.
+**The first genuinely RL-shaped component now exists**: `optimizer/funnel.py`
+(`FunnelEnv`) turns the funnel's promote/kill decisions into per-step *actions*
+(`kill / re-proxy / promote / commit`) over a 22-dim observation, and
+`optimizer/agents/promotion_agent.py` provides a LinUCB contextual bandit policy
+plus the fixed-gate and random baselines it must beat. The env runs live (real
+tools) or replays a logged table (`build_table.py` → `results_funnel.jsonl`) so
+policies train offline at zero tool cost. `optimizer/benchmark_funnel.py` is the
+honest adjudicator (wall-clock-to-95%-of-optimum, ≥20 seeds). Design rationale:
+`docs/07_rl_pipeline_design.md`; operator guide: `docs/08_funnel_optimizer.md`.
+
+**Do not re-label the existing DSE agents as RL.** The codebase documents this
+distinction deliberately and carefully. Introducing misleading terminology will be
+reverted. The promotion policy is the only component with an MDP behind it — and
+even there, the benchmark decides whether learning earns its keep (current honest
+result: a *cold-start* bandit loses to fixed gates; the pretrained-on-real-table
+test is open).
 
 ---
 
@@ -84,37 +98,37 @@ An RL policy can exploit things black-box search cannot:
 | **Policy** | small MLP (~2 hidden layers, 64 units) outputting a softmax or Gaussian over actions |
 | **Training** | policy gradient (PPO or REINFORCE) over rollouts; rollouts can be simulated offline against a pre-built table of (config, reward) pairs |
 
-### What needs to be built (in order)
+### Build status against this formulation
 
-1. **Episode-aware env wrapper** (`optimizer/rl_env.py`).
-   Today `OptEnv.step` always returns `done=False`. Wrap it as a proper `gym.Env`:
-   - observation space: the fixed-size vector above
-   - action space: `Discrete(len(all_configs))`
-   - episode termination: `trials_remaining == 0`
-   - `reset()`: fresh episode, optional warm-start from a prior result file
+The plan above has largely been **built**, with one deliberate redirection: the
+trainable policy operates over *fidelity promotion* (the genuinely sequential
+decision this project has) rather than over raw config selection (where Bayesian
+optimization over a surrogate is the better tool for a ≤10-dim mixed space — a
+config-selection PPO would re-learn what a GP prior gets for free).
 
-2. **Offline dataset** of (config, cascade_reward) pairs covering the cascade space
-   at `--max-stage proxy` (no full P&R; takes hours once on the VM, then cached).
-   Store as `results_proxy_full.jsonl`. This is the RL training corpus — rollouts
-   are simulated against it without re-running synthesis.
+1. ~~Episode-aware env wrapper~~ — **built** as `optimizer/funnel.py` (`FunnelEnv`,
+   gym-style `reset/step/done`, 22-dim observation, table-replay mode for offline
+   training).
+2. ~~Offline dataset~~ — **built**: `optimizer/build_table.py` (resumable) writes
+   per-fidelity observation rows to `optimizer/results_funnel.jsonl`; an 84-config
+   strategic F0–F2 subset is already populated from real tool runs.
+3. ~~Policy~~ — **built** as `optimizer/agents/promotion_agent.py`: LinUCB
+   contextual bandit first (hundreds of logged traces suffice); a PPO upgrade is
+   warranted only if table-simulation shows myopia measurably losing to lookahead.
+4. ~~Honest benchmark~~ — **built**: `optimizer/benchmark_funnel.py`, metric =
+   wall-clock-to-95%-of-table-optimum over ≥20 seeds vs random and fixed gates.
+   Current honest result: cold-start LinUCB **loses** to fixed gates; the fair
+   test (pretrained on the real table, F3 rows present) is the open experiment.
+5. **Generalization test (still open)** — train the surrogate on nangate45,
+   evaluate sample-efficiency on asap7 (now unblocked: the asap7 flow runs
+   correctly and the first 7 nm GDS exists).
 
-3. **Policy net + training loop** (`optimizer/agents/rl_agent.py`).
-   - `RLAgent(BaseAgent)` satisfies the existing `suggest/update` interface so it
-     can be dropped in as `--agent rl` with zero changes to `run_optimizer.py`.
-   - Internally maintains a replay buffer of (observation, action, reward) tuples
-     accumulated across trials, and runs gradient updates after each episode.
-   - Start with REINFORCE (simpler); upgrade to PPO if variance is a problem.
-
-4. **Honest benchmark** against the existing bar.
-   `benchmark_agents.py` already measures regret and trials-to-optimum. Add `rl`
-   to the comparison. The bar to beat is `--agent random` (which no current agent
-   clears on the 45-config space). Report sample efficiency: trials to reach 95%
-   of the grid-optimum reward, averaged over N random seeds.
-
-5. **Generalization test** (stretch).
-   Train on nangate45 proxy data → evaluate on asap7 proxy data. If the policy
-   needs fewer trials than random to find the asap7 optimum, that is a meaningful
-   transfer result.
+Supporting pieces that did not exist when this roadmap was written:
+`optimizer/surrogate.py` (multi-fidelity quantile-GBT, CV Spearman ρ ≈ 0.9 on
+area), `optimizer/recipe.py` (ABC synthesis recipe as a search axis at both proxy
+and full-flow fidelity), `optimizer/constants.py` (measured cycle constants,
+single source of truth), `optimizer/search_space_funnel.yaml` (the evidence-reduced
+594-config space — utilization/density measured at <1.4% effect and frozen).
 
 ---
 
@@ -123,15 +137,24 @@ An RL policy can exploit things black-box search cannot:
 | File | Role |
 |------|------|
 | `optimizer/env.py` | `OptEnv` — the base environment; `step(config)` → `(state, reward, done, info)` |
-| `optimizer/cascade.py` | multi-fidelity funnel; `run_cascade(config)` → stage reached + metrics |
-| `optimizer/cascade_env.py` | `CascadeOptEnv` — wraps the funnel as an env |
+| `optimizer/cascade.py` | multi-fidelity funnel (fixed gates); `run_cascade(config)` → stage reached + metrics |
+| `optimizer/cascade_env.py` | `CascadeOptEnv` — wraps the fixed-gate funnel as an env |
+| `optimizer/funnel.py` | `FunnelEnv` — the funnel with promotion *actions*; live or table-replay mode |
+| `optimizer/surrogate.py` | multi-fidelity surrogate: `(config, cheap obs) → (μ, σ)` per metric |
+| `optimizer/recipe.py` | ABC synthesis-recipe axis, shared between proxy and full flow |
+| `optimizer/build_table.py` | resumable offline F0–F2 table builder → `results_funnel.jsonl` |
+| `optimizer/benchmark_funnel.py` | promotion-policy benchmark on the table simulator |
+| `optimizer/constants.py` | measured constants (SW baseline, per-lane cycles, speedup caps) — import, never duplicate |
 | `optimizer/reward.py` | reward computation: `compute_reward()`, `real_speedup()`, `critical_path_ns()` |
-| `optimizer/search_space.yaml` | 45-config sim space (active; 3 axes) |
+| `optimizer/physical_runner.py` | one config through real ORFS; unit conversion, RTL-hash variant names, timeout discipline |
+| `optimizer/search_space.yaml` | 45-config sim space (3 axes) |
 | `optimizer/search_space_full.yaml` | ~27 K cascade space (6 axes, all wired to real tools) |
+| `optimizer/search_space_funnel.yaml` | 594-config reduced funnel space (lanes × acc_w × clk × recipe) |
 | `optimizer/agents/base_agent.py` | `BaseAgent` interface: `suggest(state, history)` + `update(config, reward, info)` |
 | `optimizer/agents/enumerate_agent.py` | exhaustive grid sweep — the ground truth for comparison |
+| `optimizer/agents/promotion_agent.py` | LinUCB promotion policy + fixed-gate and random baselines |
 | `optimizer/benchmark_agents.py` | offline benchmark (uses a table of real measured results, no live sim) |
-| `optimizer/measure_real.py` | pins SW baseline + per-config cycle counts from real Verilator runs |
+| `optimizer/measure_real.py` | pins SW baseline + per-lane cycle counts from real Verilator sweeps |
 
 ---
 
@@ -168,8 +191,13 @@ PHYSICAL_MOCK=1 python optimizer/test_cascade.py
 # Explore the full cascade space (proxy stage only, no P&R):
 python3 optimizer/run_cascade_optimizer.py --max-stage proxy --agent random --trials 20
 
-# Understand the reward function interactively:
+# FunnelEnv + promotion-policy track (no tools needed for these):
+PHYSICAL_MOCK=1 python3 optimizer/funnel.py            # env self-test
+python3 optimizer/benchmark_funnel.py --selftest       # policy benchmark, synthetic table
+python3 optimizer/build_table.py --dry-run             # what a real table build would run
+
+# Understand the reward function interactively (91,650 = measured cycles at 4 lanes):
 python -c "from optimizer.reward import compute_reward, critical_path_ns; \
            c={'mac_lanes':4,'accumulator_width':24,'clock_period_ns':5}; \
-           print(compute_reward(c, 0.95, 43125))"
+           print(compute_reward(c, 1.0, 91650))"
 ```
