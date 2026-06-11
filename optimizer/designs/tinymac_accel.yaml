@@ -1,0 +1,53 @@
+# optimizer/designs/tinymac_accel.yaml
+# Design spec for the TinyMAC int8 MAC accelerator (the project's primary chip).
+#
+# This spec reproduces the exact behavior of the hardcoded tinymac_accel
+# constants in physical_runner.py.  RTL file paths are relative to the repo root.
+
+name: tinymac_accel
+top:  tinymac_accel
+
+rtl_files:
+  - rtl/accel/tinymac_accel.v
+  - rtl/accel/int8_mac_array.v
+  - rtl/accel/requantize.v
+
+clock_port: clk
+
+# RTL chparam axes: the search space axes that physical_runner sets via
+# VERILOG_TOP_PARAMS="LANES n ACC_W w".
+# Param names use the optimizer canonical names (mac_lanes / accumulator_width);
+# rtl_param_name gives the actual Verilog chparam name for VERILOG_TOP_PARAMS.
+params:
+  mac_lanes:
+    choices: [1, 2, 4, 8, 16, 32]
+    default: 4
+    rtl_param_name: LANES
+  accumulator_width:
+    choices: [16, 24, 32]
+    default: 24
+    rtl_param_name: ACC_W
+
+# Per-platform timing ranges.
+# nangate45: measured Fmax ≈ 269 MHz (3.72 ns critical path, requantize Q31 multiply).
+#   Optimizer range [3.0, 8.0] ns covers from near-crit to 2× relaxed.
+# asap7: 7 nm — ~6-8× faster than nangate45 for same logic.
+#   Fresh asap7 run at 1.0 ns: Fmax ≈ 509 MHz, area 1433 µm², wns -0.965 ns.
+#   Optimizer range [0.5, 2.0] ns covers from aggressive (500+ MHz) to relaxed (< 1 GHz).
+#   SDC is in picoseconds for asap7 — physical_runner applies ×1000 conversion.
+platforms:
+  nangate45:
+    clock_range_ns: [3.0, 8.0]
+    default_clock_ns: 5.0
+  asap7:
+    clock_range_ns: [0.5, 2.0]
+    default_clock_ns: 1.0
+
+# has_macros: false — verified by synth_stat.txt: 0 macros, 0 memory bits.
+# Tier-4 (macro) knobs are suppressed for this design.
+has_macros: false
+
+# functional_eval: the TinyVAD sim is available for this design (F1 fidelity).
+# F0 uses the analytic cycle model from constants.py (AVG_CYCLES table).
+functional_eval:
+  kind: tinyvad_sim
