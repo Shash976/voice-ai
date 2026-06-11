@@ -61,10 +61,14 @@ from typing import Any
 import numpy as np
 import yaml
 
+# Bootstrap: make optimizer/ root importable (gen2/ is one level below it)
+import pathlib as _pl, sys as _sys
+_sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
+
 # ── Defensive imports for concurrent agents ──────────────────────────────────
 # recipe.py is being written by a concurrent agent; fall back gracefully.
 try:
-    from recipe import RECIPES, recipe_suffix  # noqa: F401
+    from common.recipe import RECIPES, recipe_suffix  # noqa: F401
 except ImportError:
     RECIPES = ("orfs_speed", "orfs_area", "plain")
 
@@ -81,26 +85,26 @@ except ImportError:
 
 # surrogate.py is being written by a concurrent agent; fall back gracefully.
 try:
-    from surrogate import Surrogate  # noqa: F401  (type hint only)
+    from gen2.surrogate import Surrogate  # noqa: F401  (type hint only)
     _SURROGATE_AVAILABLE = True
 except ImportError:
     _SURROGATE_AVAILABLE = False
     Surrogate = None  # type: ignore[assignment,misc]
 
 # ── Core imports (always available) ──────────────────────────────────────────
-from constants import (
+from common.constants import (
     AVG_CYCLES,
     SW_BASELINE_CYCLES,
     behavioral_cycles as _behavioral_cycles,
 )
-from cascade import _run_sim  # reuse the mock-aware Verilator wrapper
-from physical_runner import run_synth_sta, run_physical
-from cascade_reward import compute_cascade_reward
-from physical_reward import compute_physical_reward
+from gen1.cascade import _run_sim  # reuse the mock-aware Verilator wrapper
+from common.physical_runner import run_synth_sta, run_physical
+from common.cascade_reward import compute_cascade_reward
+from common.physical_reward import compute_physical_reward
 
 # ── Module paths ─────────────────────────────────────────────────────────────
-_OPTIMIZER_DIR = Path(__file__).resolve().parent
-_DEFAULT_SPACE = _OPTIMIZER_DIR / "search_space_funnel.yaml"
+_OPTIMIZER_DIR = Path(__file__).resolve().parent.parent
+_DEFAULT_SPACE = Path(__file__).resolve().parent / "search_space_funnel.yaml"
 
 # ── Accuracy table from sim_measurements.txt (V13: LANES-dependent at ACC_W<32) ──
 # Rows: (lanes, acc_w) → accuracy fraction from the 2026-06-10 measured sweep.
@@ -197,32 +201,84 @@ def _load_space(yaml_path: Path) -> tuple[dict, dict, list[str], dict, dict]:
 
 
 def _validate_funnel(config: dict, sim: dict, proxy: dict,
-                     constraints: list[str]) -> tuple[bool, str]:
-    """Minimal validation for the funnel space (continuous clock axis)."""
-    # Membership check for categorical axes
+                     constraints: list[str],
+                     active_space: dict | None = None) -> tuple[bool, str]:
+    """Minimal validation for the funnel space (continuous clock axis).
+
+    Design-agnostic: only validates params that are **present in the config**.
+    YAML params absent from the config are silently skipped — they belong to a
+    different design's space and are not applicable here (e.g. mac_lanes /
+    accumulator_width for non-TinyVAD designs like gcd).
+
+    active_space: optional dict from KnobRegistry.space() (or _build_space).
+      When provided, its bounds override the YAML bounds for continuous axes,
+      and YAML constraints whose variables exist in the config but whose range
+      differs from the active_space range are skipped.  This allows gcd configs
+      with clock_period_ns ∈ [0.3, 2.0] to pass validation even though the
+      tinymac YAML says [3.0, 8.0].
+    """
+    # Build a set of active axis names and their ranges (for constraint skipping)
+    active_bounds: dict[str, tuple[float, float]] = {}
+    active_choices: dict[str, list] = {}
+    if active_space:
+        for name, spec in active_space.items():
+            typ = spec.get("type", "categorical")
+            if typ in ("float", "continuous") and "range" in spec:
+                active_bounds[name] = (float(spec["range"][0]), float(spec["range"][1]))
+            elif typ == "categorical" and "choices" in spec:
+                active_choices[name] = list(spec["choices"])
+            elif typ == "int" and "choices" in spec:
+                active_choices[name] = list(spec["choices"])
+
+    # Membership / bounds check — only for params present in this config
     for name, spec in {**sim, **proxy}.items():
+        if name not in config:
+            continue   # not part of this design's space; skip
         if spec.get("type") == "categorical":
-            choices = spec.get("choices", [])
-            if name not in config:
-                return False, f"missing param: {name}"
-            if config[name] not in choices:
+            # Use active_space choices if available (design may have different choices)
+            choices = active_choices.get(name, spec.get("choices", []))
+            if choices and config[name] not in choices:
                 return False, f"{name}={config[name]!r} not in {choices}"
-        elif spec.get("type") == "continuous":
-            if name not in config:
-                return False, f"missing param: {name}"
-            lo = spec.get("low", float("-inf"))
-            hi = spec.get("high", float("inf"))
+        elif spec.get("type") in ("continuous", "float"):
+            # Use active_space bounds if available
+            if name in active_bounds:
+                lo, hi = active_bounds[name]
+            else:
+                lo = spec.get("low", spec.get("range", [float("-inf"), float("inf")])[0])
+                hi = spec.get("high", spec.get("range", [float("-inf"), float("inf")])[1])
             try:
                 v = float(config[name])
             except (TypeError, ValueError):
                 return False, f"{name}={config[name]!r} is not numeric"
             if not (lo <= v <= hi):
                 return False, f"{name}={v} outside [{lo}, {hi}]"
-    # Constraint expressions (same sandbox as validate.py)
+
+    # Constraint expressions (same sandbox as validate.py).
+    # Skip constraints that:
+    # (a) reference variables absent from the config (NameError) — design-specific
+    # (b) are about axes that the active_space defines differently from the YAML
+    #     (e.g. "3.0 <= clock_period_ns <= 8.0" is a tinymac constraint; gcd has
+    #     clock_period_ns ∈ [0.3, 2.0] per KnobRegistry).
     safe_globals: dict = {"__builtins__": {}}
     for expr in constraints:
+        # If constraint references an axis that active_space overrides, skip it.
+        # Heuristic: if any active_bounds key appears in the expr and active_space
+        # provides a different range, the YAML constraint is design-specific.
+        if active_bounds:
+            skip = False
+            for aname in active_bounds:
+                if aname in expr:
+                    # This constraint is about an axis that active_space defines;
+                    # the YAML constraint bounds may not apply to this design.
+                    skip = True
+                    break
+            if skip:
+                continue
         try:
             ok = bool(eval(expr, safe_globals, dict(config)))  # noqa: S307
+        except NameError:
+            # Variable referenced in constraint not in config — not applicable
+            continue
         except Exception as exc:  # noqa: BLE001
             return False, f"constraint error in {expr!r}: {exc}"
         if not ok:
@@ -264,8 +320,8 @@ def _build_state(
     budget_fraction: float,
     depth: int,                         # 0=F0, 1=F1, 2=F2, 3=F3
 ) -> np.ndarray:
-    lanes  = int(config["mac_lanes"])
-    acc_w  = int(config["accumulator_width"])
+    lanes  = int(config.get("mac_lanes", 1))        # 1 = sentinel for generic designs
+    acc_w  = int(config.get("accumulator_width", 24))  # 24 = default for generic designs
     clk    = float(config["clock_period_ns"])
     recipe = config.get("abc_recipe", "plain")
 
@@ -346,10 +402,23 @@ def _build_state(
     return vec
 
 
+# ── Fallback design descriptor (when designs.py is not yet importable) ──────────
+
+class _TinymacFallback:
+    """Minimal stand-in for DesignSpec when designs.py is not available.
+    Preserves all pre-V12 FunnelEnv behaviour for tinymac."""
+    name = "tinymac_accel"
+    top = "tinymac_accel"
+    has_macros = False
+
+    def is_tinyvad(self) -> bool:
+        return True
+
+
 # ── Main class ─────────────────────────────────────────────────────────────────
 
 class FunnelEnv:
-    """Gym-style multi-fidelity funnel environment for the TinyMAC design space.
+    """Gym-style multi-fidelity funnel environment for the design-space optimizer.
 
     One episode = one candidate config.  The promotion policy drives the episode
     by choosing actions from ACTIONS at each step.
@@ -368,6 +437,21 @@ class FunnelEnv:
     results_path: where to append per-fidelity JSONL rows.
     seed        : random seed (currently unused; reserved for stochastic proxies).
     lambda_cost : budget-pressure scaling factor λ in the per-step shaping reward.
+    design      : str | DesignSpec | None.
+                 - None (default) → DesignSpec.load("tinymac_accel") — zero
+                   behaviour change for all existing callers and tests.
+                 - str → DesignSpec.load(name_or_path).
+                 - DesignSpec instance used directly.
+                 Controls which design is run at F1/F2/F3.  When the design's
+                 functional_eval kind is NOT "tinyvad_sim", F1 is skipped:
+                 the "promote" action goes directly from F0 to F2.
+                 The fidelity-depth one-hot [18..21] reuses slot [19] for F1
+                 with value 0.0 when F1 is skipped (never set to 1.0).
+                 F0 analytic cycles/accuracy also only run for tinyvad; for
+                 generic designs F0 = legality/validate_config only (cycles
+                 and accuracy both 0.0 in the state vector).
+    max_tier    : int (default 1). Maximum knob tier active for this design.
+                 Passed through to KnobRegistry.active() and to the runner.
     """
 
     ACTIONS = ["kill", "re-proxy", "promote", "commit"]
@@ -382,9 +466,12 @@ class FunnelEnv:
         budget_s: float = 14400.0,
         surrogate: Any | None = None,
         table: dict | None = None,
-        results_path: str | Path = "results_funnel.jsonl",
+        results_path: str | Path = str(Path(__file__).resolve().parent.parent / "results_funnel.jsonl"),
         seed: int = 0,
         lambda_cost: float = 1.0,
+        design: "str | Any | None" = None,
+        max_tier: int = 1,
+        active_space: dict | None = None,
     ) -> None:
         self._space_yaml = Path(space_yaml)
         self.platform = platform
@@ -394,6 +481,15 @@ class FunnelEnv:
         self._results_path = Path(results_path)
         self._seed = seed
         self._lambda = float(lambda_cost)
+        self._max_tier = int(max_tier)
+        # active_space: the KnobRegistry space for this design+tier.  When set,
+        # _validate_funnel uses its bounds instead of the YAML-hardcoded ones.
+        # This allows generic designs (gcd) with different clock ranges to pass.
+        self._active_space: dict | None = active_space
+
+        # Resolve design spec (lazy: load on first use to keep import-time fast)
+        self._design_arg = design   # raw arg; resolved in property below
+        self.__design_spec: Any = None  # cache
 
         # Load space
         self._sim_params, self._proxy_params, self._constraints, \
@@ -417,6 +513,32 @@ class FunnelEnv:
         # _state_vec is always the most recently built 22-dim vector
         self._state_vec: np.ndarray = np.zeros(_STATE_DIM, dtype=np.float32)
 
+    @property
+    def _design_spec(self) -> Any:
+        """Resolve and cache the DesignSpec (loaded on first access)."""
+        if self.__design_spec is None:
+            arg = self._design_arg
+            if arg is None:
+                # Default: tinymac_accel (zero behaviour change)
+                try:
+                    from common.designs import DesignSpec
+                    self.__design_spec = DesignSpec.load("tinymac_accel")
+                except Exception:   # noqa: BLE001
+                    self.__design_spec = _TinymacFallback()
+            elif isinstance(arg, str):
+                from common.designs import DesignSpec
+                self.__design_spec = DesignSpec.load(arg)
+            else:
+                self.__design_spec = arg
+        return self.__design_spec
+
+    def _f1_enabled(self) -> bool:
+        """Return True if F1 (behavioral sim) should run for this design."""
+        try:
+            return self._design_spec.is_tinyvad()
+        except Exception:   # noqa: BLE001
+            return True   # safe default: run F1
+
     # ── Public properties ──────────────────────────────────────────────────────
 
     @property
@@ -438,9 +560,11 @@ class FunnelEnv:
         Raises ValueError if the config is invalid (the caller's generator
         should only propose valid configs, but we check defensively).
         """
-        # Validate
+        # Validate: use active_space bounds when set (allows generic designs with
+        # different parameter ranges than the YAML defaults, e.g. gcd clock [0.3, 2.0]).
         ok, reason = _validate_funnel(
-            config, self._sim_params, self._proxy_params, self._constraints
+            config, self._sim_params, self._proxy_params, self._constraints,
+            active_space=self._active_space,
         )
         if not ok:
             raise ValueError(f"FunnelEnv.reset: invalid config: {reason}")
@@ -538,12 +662,22 @@ class FunnelEnv:
     # ── Internal stage runners ─────────────────────────────────────────────────
 
     def _run_f0(self) -> None:
-        """Run F0: free analytic validation + cycle model + accuracy table."""
+        """Run F0: free analytic validation + cycle model + accuracy table.
+
+        For TinyVAD designs: runs the analytic cycle model and accuracy table.
+        For other designs: F0 = legality only (cycles and accuracy both 0.0).
+        """
         assert self._config is not None
-        lanes  = int(self._config["mac_lanes"])
-        acc_w  = int(self._config["accumulator_width"])
-        self._f0_cycles   = _f0_cycles(lanes)
-        self._f0_accuracy = _f0_accuracy(lanes, acc_w)
+        if self._f1_enabled():
+            # TinyVAD: use analytic cycle model + accuracy table
+            lanes  = int(self._config.get("mac_lanes", 4))
+            acc_w  = int(self._config.get("accumulator_width", 24))
+            self._f0_cycles   = _f0_cycles(lanes)
+            self._f0_accuracy = _f0_accuracy(lanes, acc_w)
+        else:
+            # Generic design: F0 = legality only
+            self._f0_cycles   = 0.0
+            self._f0_accuracy = 0.0
         self._depth = 0
         cost_s = FIDELITY_COST_S["F0"]
         self._charge(cost_s)
@@ -619,10 +753,15 @@ class FunnelEnv:
         return float(reward)
 
     def _run_f1(self) -> tuple[dict, str]:
-        """F1: behavioral Verilator sim (mock-aware via cascade._run_sim)."""
+        """F1: behavioral Verilator sim (mock-aware via cascade._run_sim).
+
+        Only called for TinyVAD designs (_f1_enabled() is True).  mac_lanes and
+        accumulator_width are always present in TinyVAD configs, but use .get()
+        defensively to avoid KeyError on unusual call paths.
+        """
         assert self._config is not None
-        lanes = int(self._config["mac_lanes"])
-        acc_w = int(self._config["accumulator_width"])
+        lanes = int(self._config.get("mac_lanes", 4))
+        acc_w = int(self._config.get("accumulator_width", 24))
 
         if self._table is not None:
             key = _config_key(self._config)
@@ -653,8 +792,8 @@ class FunnelEnv:
     def _run_f2(self) -> tuple[dict, str]:
         """F2: synth+STA proxy (run_synth_sta, mock-aware)."""
         assert self._config is not None
-        lanes  = int(self._config["mac_lanes"])
-        acc_w  = int(self._config["accumulator_width"])
+        lanes  = int(self._config.get("mac_lanes", 4))
+        acc_w  = int(self._config.get("accumulator_width", 24))
         clk    = float(self._config["clock_period_ns"])
         recipe = self._config.get("abc_recipe", "plain")
 
@@ -665,11 +804,16 @@ class FunnelEnv:
                 return dict(row.get("obs", {})), row.get("status", "ok")
             return {}, "table_miss"
 
-        # Defensive: pass abc_recipe if run_synth_sta accepts it
+        # Defensive: pass abc_recipe and design if run_synth_sta accepts them
         sig = inspect.signature(run_synth_sta)
         kwargs: dict = {}
         if "abc_recipe" in sig.parameters:
             kwargs["abc_recipe"] = recipe
+        if "design" in sig.parameters:
+            try:
+                kwargs["design"] = self._design_spec
+            except Exception:   # noqa: BLE001
+                pass   # design resolution failed; fall back to tinymac behaviour
 
         try:
             result = run_synth_sta(lanes, acc_w, clk, self.platform, **kwargs)
@@ -691,8 +835,8 @@ class FunnelEnv:
     def _run_f3(self) -> tuple[dict, str]:
         """F3: full ORFS RTL→GDS flow (run_physical, mock-aware)."""
         assert self._config is not None
-        lanes   = int(self._config["mac_lanes"])
-        acc_w   = int(self._config["accumulator_width"])
+        lanes   = int(self._config.get("mac_lanes", 4))
+        acc_w   = int(self._config.get("accumulator_width", 24))
         clk     = float(self._config["clock_period_ns"])
         recipe  = self._config.get("abc_recipe", "plain")
         # Fixed flow constants from YAML
@@ -720,7 +864,7 @@ class FunnelEnv:
         # Record whether a recipe remapping occurred (for corpus integrity / debugging).
         plain_remapped = (recipe == "plain")
 
-        # Defensive: pass abc_recipe if run_physical accepts it
+        # Defensive: pass abc_recipe and design if run_physical accepts them
         sig = inspect.signature(run_physical)
         kwargs: dict = {}
         if "abc_recipe" in sig.parameters:
@@ -731,6 +875,11 @@ class FunnelEnv:
             if f3_recipe == "orfs_area":
                 abc_val = "area"
             kwargs["abc"] = abc_val
+        if "design" in sig.parameters:
+            try:
+                kwargs["design"] = self._design_spec
+            except Exception:   # noqa: BLE001
+                pass   # design resolution failed; fall back to tinymac behaviour
 
         try:
             result = run_physical(lanes, acc_w, clk, self.platform,
@@ -797,10 +946,18 @@ class FunnelEnv:
     # ── Helpers ────────────────────────────────────────────────────────────────
 
     def _next_fidelity(self) -> str | None:
-        """Return the next not-yet-run fidelity string, or None if at F3."""
-        # depth tracks the HIGHEST fidelity already run (0=F0, 1=F1, 2=F2, 3=F3)
+        """Return the next not-yet-run fidelity string, or None if at F3.
+
+        F1 is skipped for non-TinyVAD designs: promote goes F0→F2 directly.
+        The fidelity-depth one-hot [18..21] slot [19] (F1) stays 0.0 when skipped —
+        it is never set to 1.0, so the state dim layout is preserved exactly.
+        """
         if self._depth < 1:
-            return "F1"
+            # F0 done; next is F1 for TinyVAD, or F2 for generic designs
+            if self._f1_enabled():
+                return "F1"
+            else:
+                return "F2"   # skip F1 — go straight to F2
         if self._depth < 2:
             return "F2"
         if self._depth < 3:
@@ -921,7 +1078,7 @@ if __name__ == "__main__":
                     f.write(json.dumps(row) + "\n")
         return load_table(results_path)
 
-    SPACE = Path(_OPTIMIZER_DIR) / "search_space_funnel.yaml"
+    SPACE = Path(__file__).resolve().parent / "search_space_funnel.yaml"
 
     # ── TEST A: TABLE MODE ─────────────────────────────────────────────────────
     print("\n--- TEST A: table mode (3 configs) ---")

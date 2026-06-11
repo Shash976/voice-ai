@@ -53,8 +53,9 @@ import numpy as np
 
 # ── path setup ────────────────────────────────────────────────────────────────
 _THIS_DIR = Path(__file__).resolve().parent
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
+_OPT_DIR  = Path(__file__).resolve().parents[1]
+if str(_OPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_OPT_DIR))
 
 # ── fidelity cost table (seconds) ─────────────────────────────────────────────
 # From Phase 4 / FunnelEnv spec.  F3/F4 are not built by this script.
@@ -66,12 +67,12 @@ FIDELITY_COST_S = {
 
 # ── RECIPES ───────────────────────────────────────────────────────────────────
 try:
-    from recipe import RECIPES  # type: ignore[import]
+    from common.recipe import RECIPES  # type: ignore[import]
 except ImportError:
     RECIPES = ("orfs_speed", "orfs_area", "plain")
 
 # ── constants ─────────────────────────────────────────────────────────────────
-from constants import (
+from common.constants import (
     AVG_CYCLES,
     SW_BASELINE_CYCLES,
     behavioral_cycles,
@@ -296,7 +297,7 @@ def _eval_f1(config: dict) -> tuple[dict, str]:
             _F1_CACHE[lanes] = (obs_sim, "mock")
         else:
             try:
-                from runner import run_sim  # type: ignore[import]
+                from gen1.runner import run_sim  # type: ignore[import]
                 raw = run_sim(lanes, acc_width=32)   # acc_width=32 → guaranteed correct
                 obs_sim = {
                     "avg_cycles": float(raw.get("avg_cycles", behavioral_cycles(lanes))),
@@ -316,7 +317,7 @@ def _eval_f1(config: dict) -> tuple[dict, str]:
     # Uses funnel's measured (lanes, acc_w) table (V13: acc16 accuracy is LANES-dependent)
     # so table F1 rows agree with FunnelEnv's F0 analytic accuracy.
     try:
-        from funnel import _f0_accuracy
+        from gen2.funnel import _f0_accuracy
         acc = _f0_accuracy(lanes, acc_w)
     except ImportError:
         acc = 1.0 if acc_w >= 24 else (0.92 if acc_w >= 20 else 47.0 / 64.0)
@@ -355,7 +356,7 @@ def _eval_f2(config: dict, platform: str) -> tuple[dict, str]:
         return obs, status
 
     try:
-        from physical_runner import run_synth_sta  # type: ignore[import]
+        from common.physical_runner import run_synth_sta  # type: ignore[import]
     except ImportError as exc:
         return {"error": str(exc)}, "import_error"
 
@@ -448,8 +449,82 @@ def run_table_builder(
     subset: str | None,
     dry_run: bool,
     platform: str,
+    design: "str | None" = None,
+    max_tier: int = 1,
 ) -> None:
+    """Run the table builder.
+
+    When `design` is specified, KnobRegistry.space(design_spec, max_tier, platform)
+    augments the base YAML space with knob axes.  For designs without TinyVAD
+    functional eval, F1 is skipped automatically in FunnelEnv.
+    """
     space = _load_space(space_path)
+
+    # When --design is provided, derive the space entirely from KnobRegistry.space()
+    # so a design with no RTL params (e.g. gcd) gets no phantom lanes/acc_w axes.
+    if design is not None:
+        try:
+            from common.knobs import KnobRegistry
+            reg = KnobRegistry.load()
+            # reg.space() accepts str and normalizes via DesignSpec.load() internally.
+            knob_space = reg.space(max_tier=max_tier, design=design, platform=platform)
+            # Map from KnobRegistry.space() canonical axis names to build_table grid keys.
+            # RTL param axes (mac_lanes, accumulator_width) map to lanes/acc_ws.
+            # For designs without these axes (e.g. gcd), the grid has no such dimension:
+            # set lanes=[1] and acc_ws=[0] as sentinels so the grid enumerator still
+            # works but produces configs without these keys (they are filtered below).
+            # clock_period_ns and abc_recipe always present.
+            #
+            # NOTE: mac_lanes/accumulator_width are design-specific axes whose choices
+            # come from design.params.  ORFS-only designs have no such axes.
+            if "mac_lanes" in knob_space:
+                lspec = knob_space["mac_lanes"]
+                if "choices" in lspec:
+                    space["lanes"] = [int(v) for v in lspec["choices"]]
+            elif "LANES" in knob_space:
+                # Legacy fallback (shouldn't occur after Seam 2 fix)
+                lspec = knob_space["LANES"]
+                if "choices" in lspec:
+                    space["lanes"] = [int(v) for v in lspec["choices"]]
+            else:
+                # No RTL lanes axis: use a sentinel so enumeration produces one variant
+                space["lanes"] = [0]   # sentinel: no LANES chparam
+
+            if "accumulator_width" in knob_space:
+                aspec = knob_space["accumulator_width"]
+                if "choices" in aspec:
+                    space["acc_ws"] = [int(v) for v in aspec["choices"]]
+            elif "ACC_W" in knob_space:
+                # Legacy fallback
+                aspec = knob_space["ACC_W"]
+                if "choices" in aspec:
+                    space["acc_ws"] = [int(v) for v in aspec["choices"]]
+            else:
+                # No RTL acc_w axis: use sentinel
+                space["acc_ws"] = [0]   # sentinel: no ACC_W chparam
+
+            if "clock_period_ns" in knob_space:
+                cspec = knob_space["clock_period_ns"]
+                if "range" in cspec:
+                    lo, hi = cspec["range"]
+                    steps = max(int(round((hi - lo) / 0.5)), 1)
+                    space["clks"] = [round(lo + i * 0.5, 4) for i in range(steps + 1)]
+            if "abc_recipe" in knob_space:
+                rspec = knob_space["abc_recipe"]
+                if "choices" in rspec:
+                    space["recipes"] = list(rspec["choices"])
+            has_lanes = space["lanes"] != [0]
+            has_acc_ws = space["acc_ws"] != [0]
+            print(f"Design '{design}' space (tier={max_tier}): "
+                  f"{'lanes=' + str(space['lanes']) + ' ' if has_lanes else '(no RTL lanes) '}"
+                  f"{'acc_ws=' + str(space['acc_ws']) + ' ' if has_acc_ws else '(no RTL acc_w) '}"
+                  f"clks=[{space['clks'][0]}..{space['clks'][-1]}] "
+                  f"recipes={space['recipes']}")
+        except (ImportError, FileNotFoundError) as exc:
+            print(f"WARNING: --design {design!r} could not be resolved: {exc}. "
+                  "Using default space.")
+        except Exception as exc:   # noqa: BLE001
+            print(f"WARNING: --design augmentation failed: {exc}. Using default space.")
 
     if subset == "strategic":
         configs = _strategic_subset(space)
@@ -576,7 +651,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--out",
-        default=str(_THIS_DIR / "results_funnel.jsonl"),
+        default=str(_THIS_DIR.parent / "results_funnel.jsonl"),
         help="Output JSONL file path",
     )
     parser.add_argument(
@@ -607,6 +682,27 @@ def main() -> None:
         default="nangate45",
         help="ORFS target platform",
     )
+    parser.add_argument(
+        "--design",
+        default=None,
+        help=(
+            "Design name or YAML path (e.g. 'gcd' or 'optimizer/designs/gcd.yaml'). "
+            "Default: tinymac_accel (unchanged behaviour). "
+            "Grid enumeration uses KnobRegistry.space(design, max_tier, platform) "
+            "when --design is specified. "
+            "For generic designs (no tinyvad_sim functional_eval), F1 is skipped."
+        ),
+    )
+    parser.add_argument(
+        "--max-tier",
+        type=int,
+        default=1,
+        dest="max_tier",
+        help=(
+            "Maximum knob tier to include in the search space (1–4). "
+            "Default: 1 (only dominant axes). Ignored when --design is not set."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -618,6 +714,8 @@ def main() -> None:
         subset=args.subset,
         dry_run=args.dry_run,
         platform=args.platform,
+        design=args.design,
+        max_tier=args.max_tier,
     )
 
 
@@ -673,7 +771,7 @@ def _selftest() -> None:
 
     # Also verify config_key produced by build_table matches funnel.load_table expectation
     import json as _json
-    from funnel import load_table as _load_table
+    from gen2.funnel import load_table as _load_table
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "funnel_compat.jsonl"
         canonical_cfg = {"mac_lanes": 4, "accumulator_width": 24,
