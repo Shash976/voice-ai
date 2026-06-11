@@ -68,11 +68,25 @@ class UCBAgent(BaseAgent):
     ----------
     c : float
         Exploration constant.  Default √2 (classic UCB1 value for [0,1] rewards).
+    reward_bounds : tuple[float, float] | None
+        ``(lo, hi)`` used for reward normalisation.  When *None* the module-level
+        defaults ``(_REWARD_LO, _REWARD_HI)`` = ``(−12.0, 4.5)`` are used, which
+        cover the 45-config behavioral track.  Pass ``(-100.0, 4.5)`` for the
+        physical / cascade tracks whose penalty ladder reaches −100; otherwise
+        −40/−60/−80/−100 all clamp to 0.0 and the penalty structure is invisible.
     """
 
-    def __init__(self, search_space: dict, c: float = math.sqrt(2)) -> None:
+    def __init__(self, search_space: dict, c: float = math.sqrt(2),
+                 reward_bounds: tuple | None = None) -> None:
         super().__init__(search_space)
         self.c = c
+        if reward_bounds is not None:
+            self._reward_lo  = float(reward_bounds[0])
+            self._reward_hi  = float(reward_bounds[1])
+        else:
+            self._reward_lo  = _REWARD_LO
+            self._reward_hi  = _REWARD_HI
+        self._reward_rng = self._reward_hi - self._reward_lo
         self._rewards: dict[str, dict] = {
             name: {v: [] for v in spec["choices"]}
             for name, spec in search_space.items()
@@ -126,12 +140,12 @@ class UCBAgent(BaseAgent):
                 if v is not None and v in self._rewards[name]:
                     self._rewards[name][v].append(reward)
 
-    @staticmethod
-    def _normalised_mean(rew_list: list[float]) -> float:
-        """Map raw rewards to [0, 1] using fixed bounds, then average."""
+    def _normalised_mean(self, rew_list: list[float]) -> float:
+        """Map raw rewards to [0, 1] using instance bounds, then average."""
         if not rew_list:
             return 0.0
+        lo, rng = self._reward_lo, self._reward_rng
         return sum(
-            max(0.0, min(1.0, (r - _REWARD_LO) / _REWARD_RNG))
+            max(0.0, min(1.0, (r - lo) / rng))
             for r in rew_list
         ) / len(rew_list)

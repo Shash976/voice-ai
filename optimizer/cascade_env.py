@@ -28,6 +28,12 @@ DEFAULT_SPACE = Path(__file__).parent / "search_space_full.yaml"
 
 
 class CascadeOptEnv(OptEnv):
+    #: UCBAgent normalisation window: cascade penalties reach −100 (invalid),
+    #: so the default behavioral-track bounds (−12, 4.5) would clamp the entire
+    #: penalty ladder to 0.0.  Setting a wider lower bound preserves the
+    #: escalating-penalty signal (invalid < elaborate < sim < proxy < full-fail).
+    reward_bounds: tuple[float, float] = (-100.0, 4.5)
+
     def __init__(self, search_space_path=None, platform: str = "nangate45",
                  max_stage: str = "full") -> None:
         if search_space_path is None:

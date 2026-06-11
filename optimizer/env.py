@@ -41,7 +41,15 @@ class OptEnv:
 
     History is written to results.jsonl so the Streamlit dashboard can read
     it live without any IPC.
+
+    ``reward_bounds`` is read by UCBAgent at construction time to set the
+    normalisation window that matches this track's actual reward range.
+    The 45-config behavioral track's realistic range is roughly [−10.55, +4.01];
+    bounds (−12.0, 4.5) give a little headroom on both ends.
     """
+
+    #: UCBAgent normalisation window for the behavioral-sim track.
+    reward_bounds: tuple[float, float] = (-12.0, 4.5)
 
     def __init__(self, search_space_path: str | Path | None = None) -> None:
         if search_space_path is None:
