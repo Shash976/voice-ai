@@ -99,8 +99,13 @@ static int8_t accel_clamp(int32_t x)
     return (int8_t)x;
 }
 
-/* Saturate a running accumulator to the configured bit-width.
- * Called after every MAC so intermediate overflows are modelled correctly.
+/* Saturate an accumulator value to the configured bit-width.
+ * Called once per LANES-wide chunk (after the full partial-sum psum has been
+ * added to acc), matching the RTL FSM exactly: the combinational int8_mac_array
+ * produces a LANES-wide psum in one cycle; the FSM then latches acc_sat =
+ * saturate(acc + psum) in S_MAC.  Saturation therefore happens ONCE PER CHUNK,
+ * NOT once per individual MAC product.
+ *
  * acc_width=32 → no-op (int32 never overflows int64 intermediate).
  * acc_width=24 → saturate to [-8_388_608, 8_388_607]
  * acc_width=16 → saturate to [-32_768, 32_767]
@@ -135,10 +140,21 @@ static void accel_execute(uint32_t cmd)
         uint32_t M = ar.dim_m, K = ar.dim_k;
         for (uint32_t o = 0; o < M; o++) {
             int32_t acc = ram_r32(ar.bias_ptr + o * 4);
-            for (uint32_t i = 0; i < K; i++) {
-                int32_t x  = (int32_t)ram_r8(ar.in_ptr + i) - in_zp;
-                int32_t wv = (int32_t)ram_r8(ar.wt_ptr + o * K + i);
-                acc = accel_saturate(acc + x * wv);   /* saturate per MAC */
+            /* RTL accumulates LANES products per clock cycle (one S_MAC state),
+             * computes psum = sum of up to LANES products, then latches
+             * acc_sat = saturate(acc + psum).  Saturation is once per chunk,
+             * NOT once per individual product — match that here exactly. */
+            for (uint32_t k_base = 0; k_base < K; k_base += (uint32_t)mac_lanes) {
+                int32_t psum = 0;
+                for (int lane = 0; lane < mac_lanes; lane++) {
+                    uint32_t i = k_base + (uint32_t)lane;
+                    if (i < K) {
+                        int32_t x  = (int32_t)ram_r8(ar.in_ptr + i) - in_zp;
+                        int32_t wv = (int32_t)ram_r8(ar.wt_ptr + o * K + i);
+                        psum += x * wv;
+                    }
+                }
+                acc = accel_saturate(acc + psum);   /* saturate once per LANES-chunk */
             }
             int32_t qm = ram_r32(ar.mult_ptr + o * 4);
             int32_t qs = ram_r32(ar.rshi_ptr + o * 4);
@@ -157,18 +173,33 @@ static void accel_execute(uint32_t cmd)
         if (stride == 0) { fprintf(stderr, "[accel] stride=0, skip\n"); return; }
         uint32_t out_len = (inlen + 2 * pad - kern) / stride + 1;
 
+        /* CONV1D lowers to im2col matvec in firmware (per Stage-6 design).
+         * The im2col unrolling presents a flat K = in_ch*kern reduction to the
+         * accelerator, so the RTL sees pure MATVEC chunks.  Mirror the same
+         * per-chunk saturation semantics: accumulate up to LANES products into
+         * psum, then saturate acc+psum once per chunk. */
         for (uint32_t t = 0; t < out_len; t++) {
             for (uint32_t oc = 0; oc < out_ch; oc++) {
                 int32_t acc = ram_r32(ar.bias_ptr + oc * 4);
-                for (uint32_t ic = 0; ic < in_ch; ic++) {
-                    for (uint32_t k = 0; k < kern; k++) {
-                        int pos = (int)(t * stride + k) - (int)pad;
-                        if (pos >= 0 && pos < (int)inlen) {
-                            int32_t x  = (int32_t)ram_r8(ar.in_ptr  + (uint32_t)pos * in_ch + ic) - in_zp;
-                            int32_t wv = (int32_t)ram_r8(ar.wt_ptr  + (oc * in_ch + ic) * kern + k);
-                            acc = accel_saturate(acc + x * wv);  /* saturate per MAC */
+                /* Enumerate all in_ch*kern products in the same order as im2col,
+                 * grouping into LANES-wide chunks with one saturation per chunk. */
+                uint32_t flat_k = in_ch * kern;
+                for (uint32_t k_base = 0; k_base < flat_k; k_base += (uint32_t)mac_lanes) {
+                    int32_t psum = 0;
+                    for (int lane = 0; lane < mac_lanes; lane++) {
+                        uint32_t ki = k_base + (uint32_t)lane;
+                        if (ki < flat_k) {
+                            uint32_t ic = ki / kern;
+                            uint32_t k  = ki % kern;
+                            int pos = (int)(t * stride + k) - (int)pad;
+                            if (pos >= 0 && pos < (int)inlen) {
+                                int32_t x  = (int32_t)ram_r8(ar.in_ptr  + (uint32_t)pos * in_ch + ic) - in_zp;
+                                int32_t wv = (int32_t)ram_r8(ar.wt_ptr  + (oc * in_ch + ic) * kern + k);
+                                psum += x * wv;
+                            }
                         }
                     }
+                    acc = accel_saturate(acc + psum);   /* saturate once per LANES-chunk */
                 }
                 int32_t qm = ram_r32(ar.mult_ptr + oc * 4);
                 int32_t qs = ram_r32(ar.rshi_ptr + oc * 4);
