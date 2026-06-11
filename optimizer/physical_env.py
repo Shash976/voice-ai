@@ -37,6 +37,10 @@ class PhysicalOptEnv(OptEnv):
                 with 'full'.
     """
 
+    #: UCBAgent uses this to set normalisation bounds that cover the physical
+    #: penalty ladder (−100 invalid … −20 full-flow-fail … +4.5 optimum).
+    reward_bounds: tuple[float, float] = (-100.0, 4.5)
+
     def __init__(self, search_space_path=None, platform: str = "nangate45",
                  mode: str = "full") -> None:
         super().__init__(search_space_path)
@@ -54,7 +58,25 @@ class PhysicalOptEnv(OptEnv):
         acc_w = int(config.get("accumulator_width", 24))
         clk   = float(config.get("clock_period_ns", 5))
 
-        metrics = self._eval(lanes, acc_w, clk, self.platform)    # cached per config
+        # Build optional flow-knob kwargs so all six axes reach run_physical.
+        # Stage-B: abc_recipe is forwarded to BOTH the full flow and the proxy so
+        # both fidelities use the same synthesis recipe (improving ρ correlation).
+        # Legacy abc_strategy key is also forwarded for backward compat (maps via
+        # resolve_recipe inside run_physical/run_synth_sta).
+        kwargs: dict = {}
+        if "abc_recipe" in config:
+            kwargs["abc_recipe"] = config["abc_recipe"]
+        elif "abc_strategy" in config:
+            # Legacy: forward as abc= so resolve_recipe maps 'speed'→orfs_speed etc.
+            abc_val = config["abc_strategy"]
+            kwargs["abc"] = abc_val if abc_val else None
+        if self._eval is not run_synth_sta:
+            if "core_utilization" in config:
+                kwargs["util"] = int(config["core_utilization"])
+            if "place_density" in config:
+                kwargs["density"] = float(config["place_density"])
+
+        metrics = self._eval(lanes, acc_w, clk, self.platform, **kwargs)    # cached per config
         cycles  = behavioral_cycles(lanes)
         scored  = compute_physical_reward(metrics, self._reward_cfg, cycles=cycles)
         reward  = scored["reward"]
