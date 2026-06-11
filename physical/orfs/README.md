@@ -16,8 +16,8 @@ Default parameters are the Stage-5 grid optimum: `LANES=4`, `ACC_W=24`.
 
 ## Synthesis (works offline — start here)
 
-Real gate count + cell area with just Yosys + the on-disk PDK liberty. No bazel,
-no network, no OpenROAD:
+Real gate count + cell area with just Yosys + the on-disk PDK liberty. No
+network, no OpenROAD:
 
 ```bash
 physical/orfs/synth_area.sh sky130hd     # → reports/sky130hd_{area.rpt,synth.log,netlist.v}
@@ -27,49 +27,41 @@ physical/orfs/synth_area.sh nangate45
 Latest numbers (LANES=4, ACC_W=24): sky130hd = 10,179 cells / 72,897 µm²;
 nangate45 = 12,032 cells / 14,518 µm². See [`docs/06_rtl_to_gds.md`](../../docs/06_rtl_to_gds.md).
 
-## Place & route → GDS (needs OpenROAD)
+## Place & route → GDS (`make/` — the working flow)
 
-> ⚠️ Blocked on this machine: the bazel-orfs gallery pulls Python deps from PyPI
-> (network times out here) and there is no standalone OpenROAD binary installed.
-> The design files below are ready; run them once OpenROAD/network is available.
-
-OpenROAD is provided by **bazel-orfs**, which is already cloned and cached at
-`~/bazel-orfs`. The flow runs inside that repo's `gallery/` workspace (a working
-bzlmod consuming project with the OpenROAD toolchain + ORFS PDKs wired up). The
-files here are the canonical copies; `sync.sh` drops them into a `tinymac`
-package there.
+The full flow runs through the **classic ORFS make flow** against a real ORFS
+install (the company VM has one at `/opt/OpenROAD-flow-scripts`). A design is
+just three files per platform — `config.mk`, `constraint.sdc`, and the RTL —
+under `make/<platform>/tinymac_accel/`.
 
 ```bash
-# 1. copy canonical design files into the gallery workspace
-physical/orfs/sync.sh
-
-# 2. run the flow (from the gallery workspace)
-cd ~/bazel-orfs/gallery
-bazel build //tinymac:tinymac_accel_synth    # synthesis: gate count, cell area
-bazel build //tinymac:tinymac_accel_route     # through routing: WNS/TNS, wirelength
-bazel build //tinymac:tinymac_accel_final      # full flow: GDS
-
-# stage outputs land in ~/bazel-orfs/gallery/bazel-bin/tinymac/results/<pdk>/...
-# logs + metrics + reports under the stage's _deps dir / results tree.
+physical/orfs/make/run.sh                       # one config, nangate45, through GDS
+physical/orfs/make/run.sh nangate45 gui_final   # + open the OpenROAD GUI
+physical/orfs/make/sweep.sh                     # LANES sweep → sweep_results.csv
 ```
 
-## PDK targets
+Platforms configured: **nangate45** (45 nm, primary), **asap7** (7 nm-class
+target — note its SDC time unit is *picoseconds*; the optimizer handles the
+conversion, see `optimizer/physical_runner.py`), **sky130hd** (130 nm bring-up).
 
-- **sky130hd** (current `BUILD.bazel`) — 130 nm bring-up. Proven on this machine
-  (the `gallery/serv` example runs here). Confirms the RTL synthesizes and the
-  flow closes; gives a first area number.
-- **asap7** — the project's real 7nm-class target. Switch `pdk` to
-  `@orfs//flow:asap7` and tighten `constraints.sdc` to the 5 ns Stage-5 target,
-  then report achieved slack (WNS/TNS) and area.
+The Stage-5 optimizer drives this flow programmatically
+(`optimizer/run_physical_optimizer.py`, and the multi-fidelity funnel in
+`optimizer/funnel.py` — see [`docs/08_funnel_optimizer.md`](../../docs/08_funnel_optimizer.md)).
+
+> **Historical note:** a bazel-orfs route was tried first and abandoned — its
+> gallery workspace needs PyPI access that times out on the available networks.
+> Its files (`BUILD.bazel`, `sync.sh`, a root-level `constraints.sdc`) were
+> removed; the make flow is the only supported path.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `BUILD.bazel` | `demo_flow()` target — PDK, SDC, RTL list, util/density args |
-| `constraints.sdc` | clock definition + I/O delays |
-| `sync.sh` | copy canonical RTL + these files into the gallery `tinymac` package |
-| `reports/` | collected area/timing/power reports (committed per run) |
+| `make/<platform>/tinymac_accel/config.mk` | ORFS design config (RTL list, clock, util/density) |
+| `make/<platform>/tinymac_accel/constraint.sdc` | clock definition (platform-native time unit) |
+| `make/run.sh` | stage design files into ORFS and run one full flow |
+| `make/sweep.sh` | parameter sweep via `VERILOG_TOP_PARAMS` + per-config `FLOW_VARIANT` |
+| `synth_area.sh` | yosys-only area sweep, runs anywhere |
 
 ## Results
 
