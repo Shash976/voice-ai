@@ -15,7 +15,12 @@ from __future__ import annotations
 
 from physical_reward import compute_physical_reward
 
-_DEFAULT_PENALTY = {"invalid": -100.0, "elaborate": -80.0, "sim": -60.0, "proxy": -40.0}
+# V4: monotone penalty ladder — more information gained = less negative penalty.
+# invalid −100 < elaborate −80 < sim −60 < proxy −40 < full-flow-fail −20
+# 'full' failure (deepest stage reached) must be LESS negative than proxy failure
+# so the agent learns that dying at P&R is better than dying at elaboration.
+_DEFAULT_PENALTY = {"invalid": -100.0, "elaborate": -80.0, "sim": -60.0,
+                    "proxy": -40.0, "full": -20.0}
 
 
 def compute_cascade_reward(result: dict, weights: dict | None = None) -> dict:
@@ -34,6 +39,12 @@ def compute_cascade_reward(result: dict, weights: dict | None = None) -> dict:
         return _early(penalty["sim"], "sim", result)
     if failed == "proxy":
         return _early(penalty["proxy"], "proxy", result)
+    # V4: full-flow failure (reached P&R but the flow/parse failed) scores −20
+    # — better than proxy failure (−40) because more information was gathered.
+    # This prevents the fall-through to compute_physical_reward which would score
+    # −100 on missing metrics, inverting the penalty ladder.
+    if failed == "full":
+        return _early(penalty["full"], "full", result)
 
     # ── Survived to proxy/full (or full failed): score on real metrics ─────────
     metrics = dict(result.get("metrics") or {})
