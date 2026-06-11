@@ -45,6 +45,7 @@ Each stage feeds the next. The doc map below tells you which file to read for ea
 | 3 | PicoRV32 CPU, bare-metal firmware, the Verilator simulator | [02_firmware_and_simulation.md](02_firmware_and_simulation.md) |
 | 4 | The memory-mapped MAC accelerator + its firmware driver | [03_accelerator.md](03_accelerator.md) |
 | 5 | The Python design-space optimizer (agents + reward + benchmark) | [04_optimizer.md](04_optimizer.md) |
+| 5 (gen 2) | The multi-fidelity funnel optimizer: surrogate model + trainable promote/kill policy | [08_funnel_optimizer.md](08_funnel_optimizer.md) (rationale: [07](07_rl_pipeline_design.md)) |
 | 6 | Synthesizable RTL, Verilator correctness gate, ORFS → GDS, physical metrics | [06_rtl_to_gds.md](06_rtl_to_gds.md) |
 | — | Every command in one place | [05_commands_cheatsheet.md](05_commands_cheatsheet.md) |
 
@@ -218,4 +219,12 @@ question: a dedicated MAC array is fast (few hundred µs/inference) and small
 - **WNS / TNS** — worst/total negative slack: how much timing is violated at a given
   clock target. Negative = design won't work at that clock.
 - **DSE** — design-space exploration: searching over hardware configs to find the best
-  tradeoff. What the optimizer currently does. Distinct from RL (see `AGENTS.md`).
+  tradeoff. What the first-generation optimizer does. Distinct from RL (see `AGENTS.md`).
+- **Multi-fidelity funnel** — evaluating a candidate config through a ladder of
+  increasingly expensive checks (analytic → simulation → synthesis proxy → full
+  place-and-route), killing bad configs at the cheapest stage that exposes them.
+  The second-generation optimizer (doc 08) makes the promote/kill decisions
+  themselves learnable — the project's one genuine sequential decision problem.
+- **Surrogate model** — a cheap learned predictor of expensive tool outcomes (here:
+  final area/timing/power predicted from the config plus early-stage observations),
+  used to decide where to spend real tool time.
