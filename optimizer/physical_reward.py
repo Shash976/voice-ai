@@ -23,14 +23,11 @@ from __future__ import annotations
 import math
 
 from reward import SW_BASELINE_LATENCY_NS, acc_overflows
-
-# ── Behavioral cycle model (Stage-4 empirical fit) ────────────────────────────
-# avg_cycles(lanes) ≈ 28000 + 242000/lanes  — matches the measured accelerated
-# sim (8 lanes→58.6K, 16 lanes→43.4K; see search_space.yaml / docs/03).
-# acc_width does NOT change the cycle count.  If the Verilator sim binary is
-# available the caller may pass real cycles instead (see compute_physical_reward).
-_CYCLE_OVERHEAD = 28_000.0
-_CYCLE_MAC_WORK = 242_000.0
+# Single source of truth: cycle model constants come from constants.py.
+# Measured 2026-06-10 after V13 saturation-order fix.
+# Old values: _CYCLE_OVERHEAD=28000, _CYCLE_MAC_WORK=242000 (synthetic fit).
+# New values: fit to measured AVG_CYCLES over lanes {1,2,4,8,16,32}.
+from constants import _CYCLE_OVERHEAD, _CYCLE_MAC_WORK
 
 # Real nangate45 LANES=4 ACC_W=24 anchors (the first full GDS): area/power terms
 # are normalised to ~1.0 here so the YAML weights carry over from the proxy reward.
@@ -46,8 +43,14 @@ def achieved_period_ns(clk_ns: float, fmax_mhz: float | None) -> float:
     """Period the silicon actually runs at: the slower of the requested clock
     and the routed critical-path period (1000/Fmax).  An over-aggressive clock
     request gives no free speed — exactly reward.effective_clock_ns, but using
-    the MEASURED Fmax instead of the analytical critical-path estimate."""
-    crit = (1000.0 / fmax_mhz) if fmax_mhz else float(clk_ns)
+    the MEASURED Fmax instead of the analytical critical-path estimate.
+
+    V2: if fmax_mhz is None (parse failed or flow didn't produce it), return a
+    very large period so the speedup term is essentially 0, not a fallback to the
+    requested clock which would silently award speed from zero physical data."""
+    if fmax_mhz is None:
+        return float("inf")          # no measurement → zero speedup; never award free speed
+    crit = 1000.0 / fmax_mhz
     return max(float(clk_ns), crit)
 
 
@@ -80,10 +83,14 @@ def compute_physical_reward(
     min_spd  = w.get("min_useful_speedup",  10.0)
     perf_pen = w.get("perf_floor_penalty",  -8.0)
 
-    # A failed flow (no reports) is the worst possible outcome.
-    if metrics.get("status") == "FAIL":
+    # V2: ANY non-ok status (FAIL, PARSE_FAIL, TIMEOUT, mock-proxy-fail, …) is
+    # treated as the worst-case outcome.  We never substitute reference values
+    # for missing measurements — that would silently award reward from no data.
+    status = metrics.get("status", "ok")
+    if status not in ("ok", "mock", "mock-proxy"):
         return {"reward": -100.0, "real_speedup": 0.0, "norm_speedup": -1.0,
-                "accuracy": 0.0, "timing_violation": True, "infeasible": True}
+                "accuracy": 0.0, "timing_violation": True, "infeasible": True,
+                "status": status}
 
     accuracy = 0.0 if acc_overflows({"accumulator_width": metrics["acc_w"]}) else 1.0
     spd      = physical_real_speedup(metrics, cycles)
@@ -94,8 +101,17 @@ def compute_physical_reward(
     else:
         norm_spd = -1.0
 
-    area  = (metrics.get("area_um2") or AREA_REF_UM2) / AREA_REF_UM2
-    power = (metrics.get("power_mw") or POWER_REF_MW) / POWER_REF_MW
+    # V2: do NOT substitute AREA_REF / POWER_REF when measurements are missing.
+    # Missing area/power means the flow didn't complete — treat as infeasible.
+    area_um2 = metrics.get("area_um2")
+    power_mw = metrics.get("power_mw")
+    if area_um2 is None or power_mw is None:
+        return {"reward": -100.0, "real_speedup": 0.0, "norm_speedup": -1.0,
+                "accuracy": 0.0, "timing_violation": True, "infeasible": True,
+                "status": "PARSE_FAIL"}
+
+    area  = area_um2 / AREA_REF_UM2
+    power = power_mw / POWER_REF_MW
     t_viol = 0.0 if metrics.get("timing_met", True) else 1.0
 
     floor_penalty = perf_pen if spd < min_spd else 0.0
