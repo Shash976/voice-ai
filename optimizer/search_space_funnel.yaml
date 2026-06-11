@@ -1,0 +1,126 @@
+# search_space_funnel.yaml — reduced design space for the FunnelEnv / Stage-B pipeline.
+#
+# Phase 5 architecture updates forced by empirical data:
+#   - CORE_UTILIZATION and PLACE_DENSITY demoted to fixed constants (<0.3% / ~1.4% effect)
+#   - abc_recipe promoted to first-class categorical axis (43% synth-area spread)
+#   - clock_period_ns kept continuous (strongest flow-level coupling after LANES)
+#   - lanes reduced to the physically-meaningful set {1,2,4,8,16,32}
+#   - accumulator_width: {16,24,32} (20/28 removed; 24 is the minimum correct width)
+#
+# Space size: 6 × 3 × 11 (grid) × 3 = 594 configs on the offline table grid
+# (vs ~27K in search_space_full.yaml and ~2.2K after util/density pruning there)
+#
+# YAML schema compatible with how cascade_env.py / CascadeOptEnv loads YAMLs:
+#   raw["sim_params"] / raw["proxy_params"] / raw["reward"] / raw["constraints"] / raw["gates"]
+
+# ── Simulated parameters (Verilator cycle-accurate) ──────────────────────────
+sim_params:
+  mac_lanes:
+    type: categorical
+    choices: [1, 2, 4, 8, 16, 32]
+    default: 4
+    flag: "--mac-lanes"
+    description: >
+      Parallel int8 MAC lanes. Per-layer latency = n_outputs × (ceil(K/lanes) + 2).
+      RTL: chparam LANES. Dominant area lever (×2.6 from L1→L32).
+
+  accumulator_width:
+    type: categorical
+    choices: [16, 24, 32]
+    default: 24
+    flag: "--acc-width"
+    description: >
+      Accumulator bit-width (RTL: chparam ACC_W). acc_w=16 yields hardware-accurate
+      wrong outputs (47–58/64 correct depending on LANES per sim_measurements.txt).
+      acc_w=24 is the minimum safe width; acc_w=32 provides full precision.
+      V13 note: ACC_W<32 accuracy is LANES-dependent (RTL per-chunk saturation);
+      carry accuracy as an observation, do NOT hard-kill on acc_w=16.
+
+# ── Physical flow parameters (Yosys / OpenROAD) ───────────────────────────────
+proxy_params:
+  clock_period_ns:
+    type: continuous
+    low: 3.0
+    high: 8.0
+    default: 5.0
+    # table_grid annotation: build the offline lookup table at 0.5 ns resolution
+    # → 11 grid values: [3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0]
+    table_grid: 0.5
+    description: >
+      Target clock period (ns), written into the SDC. Drives tool effort:
+      measured across 46 builds Fmax tracks the constraint (113 MHz @ 20 ns,
+      307 MHz @ 0.5 ns). Range [3.0, 8.0] spans slightly-tight to very-relaxed
+      relative to the requantize critical path (~3.72 ns on nangate45).
+
+  abc_recipe:
+    type: categorical
+    choices: ["orfs_speed", "orfs_area", "plain"]
+    default: "plain"
+    description: >
+      ABC synthesis recipe. Measured spread: 14,426–20,675 µm² (43% area,
+      59% pre-layout delay). orfs_speed uses ORFS abc_speed.script (ABC_AREA
+      not set); orfs_area uses abc_area.script (ABC_AREA=1); plain uses
+      the default `abc -liberty` (smallest area but unbuffered, fanout-distorted WNS).
+      Concurrent optimizer/recipe.py exposes these through run_synth_sta /
+      run_physical; imported defensively here.
+      PLAIN/F3 ASYMMETRY: "plain" is valid for F2 (proxy synth+STA) but NOT for
+      F3 (full ORFS flow). FunnelEnv._run_f3() maps plain→orfs_speed at F3 and
+      records obs["effective_abc_recipe"]="orfs_speed" and
+      obs["plain_remapped_to_orfs_speed"]=True so the training corpus is honest.
+      The config key for table lookups always uses the REQUESTED recipe ("plain"),
+      not the effective one — this is the canonical key convention. The effective
+      recipe is carried in obs only, never in the config dict.
+
+# ── Fixed flow constants (Phase 5: measured sensitivity <1.4%, demoted) ───────
+fixed:
+  CORE_UTILIZATION: 40    # <0.3% area effect across measured range
+  PLACE_DENSITY: 0.60     # ~1.4% area effect; not worth the axis complexity
+
+# ── Validity constraints (gate 1: validate) ──────────────────────────────────
+# Declarative boolean expressions over param names — eval'd by validate.py.
+# NOTE: clock_period_ns is continuous so no choices-membership check applies;
+# the validate gate checks the constraint bounds instead.
+constraints:
+  - "3.0 <= clock_period_ns <= 8.0"
+  - "mac_lanes >= 1"
+  - "mac_lanes <= 32"
+  - "accumulator_width in [16, 24, 32]"
+  - "abc_recipe in ['orfs_speed', 'orfs_area', 'plain']"
+
+# ── Funnel gate thresholds ────────────────────────────────────────────────────
+# Used by cascade.evaluate when called via FunnelEnv live mode.
+# FunnelEnv itself does NOT hard-gate on accuracy (V13 note: acc_w=16 passes as
+# observation, agent decides whether to kill or promote).
+gates:
+  sim:
+    min_accuracy: 0.0          # no hard accuracy kill — FunnelEnv carries acc as obs
+  proxy:
+    max_area_um2: 80000.0      # reject obviously-too-big synth area estimate
+    require_timing_met: false  # proxy WNS is pessimistic; let F3 judge
+  full:
+    require_timing_met: false  # multi-objective reward is the final filter
+
+# ── Reward function ──────────────────────────────────────────────────────────
+# Same weights as search_space_full.yaml so cross-track results are comparable.
+# max_speedup = 1024 (Stage-B; MAX_SPEEDUP_FULL from constants.py):
+#   lanes=32, clk=3.0 ns (near critical path 3.72 → effective 3.72):
+#     real_speedup = 111,966,380 / (39,310 × 3.72) = 765×
+#   1024 / 765 = 1.34× headroom. Power-of-2 convention.
+reward:
+  w_accuracy:          2.0
+  w_speedup:           3.0
+  w_area:             -0.4
+  w_power:            -0.4
+  w_timing_violation: -3.0
+  max_speedup:      1024.0
+  min_useful_speedup:  10.0
+  perf_floor_penalty:  -8.0
+
+  # Monotone penalty ladder (V4 fix): more information = less negative.
+  # invalid −100 < elaborate −80 < sim −60 < proxy −40 < full-flow-fail −20
+  stage_penalty:
+    invalid:   -100.0
+    elaborate:  -80.0
+    sim:        -60.0
+    proxy:      -40.0
+    full:       -20.0
