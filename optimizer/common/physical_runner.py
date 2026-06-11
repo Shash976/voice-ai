@@ -23,6 +23,30 @@ Report strings parsed below were confirmed against a real VM run:
 
 Set PHYSICAL_MOCK=1 to skip OpenROAD and return synthetic-but-plausible metrics
 (for testing the optimizer loop on a machine without the tools).
+
+DESIGN-AGNOSTIC EXTENSION (V12):
+  run_physical() and run_synth_sta() now accept:
+    design: DesignSpec | None = None
+      None → DesignSpec.load("tinymac_accel"), preserving every existing call.
+    knob_values: dict | None = None
+      ORFS knob key→value dict from KnobRegistry; emit lines appended to config.mk
+      after validate_config(). Knobs not present in knob_values are not emitted
+      (use the ORFS defaults).
+
+  When design is provided:
+    - DESIGN_NAME/top, VERILOG_FILES, SDC clock port come from the DesignSpec.
+    - VERILOG_TOP_PARAMS is assembled from design.params ∩ config keys.
+    - The RTL content hash is computed from the DesignSpec's rtl_files (not the
+      hardcoded RTL_FILES tuple), so any design gets automatic cache invalidation
+      on RTL changes.
+    - Variant names gain a design-name prefix only for non-tinymac designs
+      (existing tinymac result dirs stay reachable unchanged).
+
+  Macro auto-detect:
+    After synthesis (run_synth_sta), the synth stat is parsed for macro/instance
+    counts. When the design's has_macros is None (auto-detect), the result carries
+    a has_macros_detected bool. Callers should propagate this back to the DesignSpec
+    so tier-4 knobs become active for the next round.
 """
 
 from __future__ import annotations
@@ -35,7 +59,7 @@ import signal
 import subprocess
 from pathlib import Path
 
-from recipe import (
+from common.recipe import (
     RECIPES,
     config_mk_lines,
     recipe_suffix,
@@ -44,11 +68,14 @@ from recipe import (
     yosys_abc_line,
 )
 
-_REPO    = Path(__file__).resolve().parent.parent
+_REPO    = Path(__file__).resolve().parent.parent.parent
 MAKE_DIR = _REPO / "physical" / "orfs" / "make"
 RTL_DIR  = _REPO / "rtl" / "accel"
 DESIGN   = "tinymac_accel"
 RTL_FILES = ("tinymac_accel.v", "int8_mac_array.v", "requantize.v")
+
+# DesignSpec is imported lazily inside _config_mk, _stage_inputs, etc. to avoid
+# circular imports and keep backward compatibility with callers that don't use design.
 
 # V1: single source of truth for asap7 vs nangate45 time units.
 # asap7 SDCs are in picoseconds; nangate45 in nanoseconds.
@@ -109,7 +136,9 @@ _synth_sta_cache: dict[tuple, dict] = {}
 
 def variant_name(lanes: int, acc_w: int, clk_ns: float,
                  util: int = 40, density: float = 0.60, abc: str | None = None,
-                 abc_recipe: str | None = None) -> str:
+                 abc_recipe: str | None = None,
+                 design: "Any | None" = None,
+                 knob_values: "dict | None" = None) -> str:
     """Compute a unique, deterministic variant identifier.
 
     abc_recipe wins over legacy abc kwarg (resolve_recipe handles both).
@@ -118,6 +147,19 @@ def variant_name(lanes: int, acc_w: int, clk_ns: float,
         orfs_speed → no suffix      (default, matches pre-recipe naming)
         orfs_area  → "_area"
         plain      → "_plain"
+
+    V12: when design is a DesignSpec:
+      - The RTL hash comes from design.rtl_hash() rather than the hardcoded
+        tinymac RTL_FILES.
+      - For non-tinymac designs, the variant name is prefixed with the design
+        name so result dirs stay in a separate namespace (existing tinymac dirs
+        remain at the same path).
+
+    V13: knob_values (tier-2/3 ORFS knobs) are now included in the variant name
+      as a short SHA-256 hash suffix when non-empty.  Without this, two configs
+      differing only in PLACE_DENSITY_LB_ADDON would map to the same variant dir
+      and the second run would silently reuse the first run's GDS — a stale-cache
+      bug that this codebase was already burned by (see CLAUDE.md Gotchas).
     """
     # V11: use {:.4g} so 1.25 and 1.2 produce distinct tokens ("1p25" vs "1p2");
     # the old :.1f caused variant_name(4,24,1.25)==variant_name(4,24,1.2).
@@ -134,9 +176,27 @@ def variant_name(lanes: int, acc_w: int, clk_ns: float,
     # resolve_recipe() handles legacy abc='speed'/'area' and new abc_recipe= kwarg.
     resolved = resolve_recipe(abc_recipe=abc_recipe, abc=abc)
     name += recipe_suffix(resolved)
-    # V3: append RTL content hash so any RTL edit produces a new variant name
-    # and old built results dirs become naturally unreachable.
-    name += f"_r{_rtl_hash()}"
+
+    # V13: knob_values hash — ensures tier-2/3 knob differences produce distinct
+    # variant dirs, preventing stale-cache reuse across configs that differ only
+    # in knob_values.  Only appended when knob_values is non-empty so all existing
+    # (no-knob-values) variant names stay unchanged.
+    if knob_values:
+        import json as _json
+        kv_str = _json.dumps({k: knob_values[k] for k in sorted(knob_values)},
+                             sort_keys=True, separators=(",", ":"))
+        kv_hash = hashlib.sha256(kv_str.encode()).hexdigest()[:6]
+        name += f"_k{kv_hash}"
+
+    # V3/V12: append RTL content hash.
+    # For tinymac (design is None or design.name == "tinymac_accel"), use the
+    # legacy _rtl_hash() so existing result dirs are still reachable.
+    if design is None or design.name == "tinymac_accel":
+        name += f"_r{_rtl_hash()}"
+    else:
+        # Non-tinymac: prefix the design name to avoid namespace collision.
+        name = f"{design.name}_{name}_r{design.rtl_hash()}"
+
     return name
 
 
@@ -160,10 +220,11 @@ def _last_float_on_line(text: str, prefix: str) -> float | None:
     return None
 
 
-def _parse_metrics(work: Path, platform: str, variant: str, clk_ns: float) -> dict:
-    rpt  = work / "reports" / platform / DESIGN / variant / "6_finish.rpt"
-    rlog = work / "logs"    / platform / DESIGN / variant / "6_report.log"
-    gds  = work / "results" / platform / DESIGN / variant / "6_final.gds"
+def _parse_metrics(work: Path, platform: str, variant: str, clk_ns: float,
+                   design_name: str = DESIGN) -> dict:
+    rpt  = work / "reports" / platform / design_name / variant / "6_finish.rpt"
+    rlog = work / "logs"    / platform / design_name / variant / "6_report.log"
+    gds  = work / "results" / platform / design_name / variant / "6_final.gds"
 
     rpt_txt, rlog_txt = _read(rpt), _read(rlog)
 
@@ -236,8 +297,22 @@ def _parse_metrics(work: Path, platform: str, variant: str, clk_ns: float) -> di
 
 def _config_mk(platform: str, variant: str, lanes: int, acc_w: int,
                util: int = 40, density: float = 0.60, abc: str | None = None,
-               abc_recipe: str | None = None) -> str:
+               abc_recipe: str | None = None,
+               design: "Any | None" = None,
+               knob_values: "dict | None" = None) -> str:
     """Generate the per-variant ORFS config.mk content.
+
+    When `design` is None, falls back to the legacy hardcoded tinymac_accel
+    behaviour (preserves all existing call sites unchanged).
+
+    When `design` is a DesignSpec:
+      - DESIGN_NAME and VERILOG_FILES come from the design spec.
+      - VERILOG_TOP_PARAMS is built from design.params ∩ config (lanes/acc_w
+        are passed as top-level args for backward compat; the design bridge
+        assembles the full string).
+      - knob_values: additional ORFS knob k→v pairs emitted after the standard
+        lines.  validate_config() is called first; any errors are printed as
+        warnings but do not abort (let the flow fail naturally for hard conflicts).
 
     The abc recipe is written as ABC_AREA=1 for orfs_area (the only ORFS
     mechanism); orfs_speed uses the default (omit the variable).
@@ -250,51 +325,187 @@ def _config_mk(platform: str, variant: str, lanes: int, acc_w: int,
     abc_lines = "\n".join(config_mk_lines(resolved))
     if abc_lines:
         abc_lines += "\n"
+
+    if design is None:
+        # ── Legacy tinymac-hardcoded path ────────────────────────────────────
+        return (
+            "export DESIGN_HOME = .\n"
+            f"export DESIGN_NAME = {DESIGN}\n"
+            f"export PLATFORM    = {platform}\n"
+            "export VERILOG_FILES = $(DESIGN_HOME)/src/$(DESIGN_NAME)/tinymac_accel.v \\\n"
+            "                       $(DESIGN_HOME)/src/$(DESIGN_NAME)/int8_mac_array.v \\\n"
+            "                       $(DESIGN_HOME)/src/$(DESIGN_NAME)/requantize.v\n"
+            f"export SDC_FILE      = $(DESIGN_HOME)/{platform}/$(DESIGN_NAME)/constraint_{variant}.sdc\n"
+            f"export CORE_UTILIZATION      = {util}\n"
+            f"export PLACE_DENSITY          = {density}\n"
+            f"{abc_lines}"
+            "export SYNTH_REPEATABLE_BUILD = 1\n"
+            f"export VERILOG_TOP_PARAMS = LANES {lanes} ACC_W {acc_w}\n"
+        )
+
+    # ── Design-agnostic path ─────────────────────────────────────────────────
+    design_name = design.name
+    # Build VERILOG_FILES lines.  Use $(DESIGN_HOME)/src/<design>/<file> for
+    # files that have already been copied into the work tree (see _stage_inputs).
+    # For external absolute paths (e.g. gcd from ORFS), we must use the
+    # absolute path directly since we copy to src/<design>/<filename>.
+    rtl_fnames = [Path(f).name for f in design.rtl_files]
+    if len(rtl_fnames) == 1:
+        vfile_lines = (
+            f"export VERILOG_FILES = $(DESIGN_HOME)/src/{design_name}/{rtl_fnames[0]}\n"
+        )
+    else:
+        first = f"$(DESIGN_HOME)/src/{design_name}/{rtl_fnames[0]}"
+        rest  = " \\\n".join(
+            f"                       $(DESIGN_HOME)/src/{design_name}/{fn}"
+            for fn in rtl_fnames[1:]
+        )
+        vfile_lines = f"export VERILOG_FILES = {first} \\\n{rest}\n"
+
+    # VERILOG_TOP_PARAMS: build from design.params + caller args.
+    # Each param entry may carry a 'rtl_param_name' key giving the Verilog chparam
+    # name (e.g. mac_lanes → LANES).  When absent, the param name itself is used.
+    # For backward compat with callers that pass lanes/acc_w directly, we resolve
+    # the legacy positional args via the canonical param names too.
+    vtp_parts = []
+    if design.params:
+        # Build a lookup: canonical_param_name -> (rtl_name, value_from_caller)
+        # Caller's positional lanes/acc_w feed the canonical names mac_lanes/accumulator_width
+        # (and also the legacy names LANES/ACC_W for pre-rename designs).
+        param_vals: dict[str, Any] = {}
+        for pname, pspec in design.params.items():
+            rtl_name = pspec.get("rtl_param_name", pname) if isinstance(pspec, dict) else pname
+            # Resolve caller positional args for well-known RTL names
+            if rtl_name == "LANES" or pname in ("LANES", "mac_lanes"):
+                param_vals[pname] = lanes
+            elif rtl_name == "ACC_W" or pname in ("ACC_W", "accumulator_width"):
+                param_vals[pname] = acc_w
+        # knob_values may carry overrides for any param (by canonical name)
+        if knob_values:
+            for pk in design.params:
+                if pk in knob_values:
+                    param_vals[pk] = knob_values[pk]
+        # Emit VERILOG_TOP_PARAMS using the RTL param names (not canonical names)
+        for pname, pspec in design.params.items():
+            if pname in param_vals:
+                rtl_name = pspec.get("rtl_param_name", pname) if isinstance(pspec, dict) else pname
+                vtp_parts += [rtl_name, str(param_vals[pname])]
+    vtp_line = ""
+    if vtp_parts:
+        vtp_line = f"export VERILOG_TOP_PARAMS = {' '.join(vtp_parts)}\n"
+
+    # knob_values: validate, then emit
+    extra_lines = ""
+    if knob_values:
+        try:
+            from common.knobs import validate_config as _vc, KnobRegistry
+            import sys as _sys
+            warnings = _vc(knob_values)
+            for w in warnings:
+                print(f"[physical_runner] knob warning: {w}", file=_sys.stderr)
+            reg = KnobRegistry.load()
+            # Only emit knobs that are not already emitted above (util/density/abc/vtp)
+            _SKIP_EMIT = {"CORE_UTILIZATION", "PLACE_DENSITY", "VERILOG_TOP_PARAMS",
+                          "ABC_AREA", "CLOCK_PERIOD"}
+            for kname, kval in knob_values.items():
+                if kname in _SKIP_EMIT:
+                    continue
+                knob = reg.get(kname)
+                if knob is not None:
+                    lines = knob.emit_lines(kval)
+                    extra_lines += "\n".join(lines) + ("\n" if lines else "")
+                # Unknown knob names are silently dropped (future-proofing)
+        except ImportError:
+            pass  # knobs.py not yet available; skip knob emission
+
     return (
         "export DESIGN_HOME = .\n"
-        f"export DESIGN_NAME = {DESIGN}\n"
+        f"export DESIGN_NAME = {design_name}\n"
         f"export PLATFORM    = {platform}\n"
-        "export VERILOG_FILES = $(DESIGN_HOME)/src/$(DESIGN_NAME)/tinymac_accel.v \\\n"
-        "                       $(DESIGN_HOME)/src/$(DESIGN_NAME)/int8_mac_array.v \\\n"
-        "                       $(DESIGN_HOME)/src/$(DESIGN_NAME)/requantize.v\n"
-        f"export SDC_FILE      = $(DESIGN_HOME)/{platform}/$(DESIGN_NAME)/constraint_{variant}.sdc\n"
+        f"{vfile_lines}"
+        f"export SDC_FILE      = $(DESIGN_HOME)/{platform}/{design_name}/constraint_{variant}.sdc\n"
         f"export CORE_UTILIZATION      = {util}\n"
         f"export PLACE_DENSITY          = {density}\n"
         f"{abc_lines}"
         "export SYNTH_REPEATABLE_BUILD = 1\n"
-        f"export VERILOG_TOP_PARAMS = LANES {lanes} ACC_W {acc_w}\n"
+        f"{vtp_line}"
+        f"{extra_lines}"
     )
 
 
 def _stage_inputs(platform: str, variant: str, lanes: int, acc_w: int, clk_ns: float,
                   util: int = 40, density: float = 0.60, abc: str | None = None,
-                  abc_recipe: str | None = None) -> Path:
+                  abc_recipe: str | None = None,
+                  design: "Any | None" = None,
+                  knob_values: "dict | None" = None) -> Path:
     """Copy RTL into the work tree and write the per-variant config.mk + SDC.
-    Returns the path to the generated config.mk."""
-    cfgdir = MAKE_DIR / platform / DESIGN
-    srcdir = MAKE_DIR / "src" / DESIGN
+    Returns the path to the generated config.mk.
+
+    When design is None, uses the legacy tinymac-hardcoded behaviour.
+    When design is a DesignSpec, copies design.rtl_files to the work tree and
+    uses the DesignSpec to generate the SDC and config.mk.
+    """
+    if design is None:
+        # ── Legacy path ──────────────────────────────────────────────────────
+        cfgdir = MAKE_DIR / platform / DESIGN
+        srcdir = MAKE_DIR / "src" / DESIGN
+        srcdir.mkdir(parents=True, exist_ok=True)
+        cfgdir.mkdir(parents=True, exist_ok=True)
+
+        for f in RTL_FILES:
+            shutil.copy(RTL_DIR / f, srcdir / f)
+
+        base_sdc = cfgdir / "constraint.sdc"
+        if not base_sdc.exists():
+            raise FileNotFoundError(
+                f"base SDC missing: {base_sdc} "
+                f"(expected from physical/orfs/make/{platform}/{DESIGN}/)"
+            )
+        # V1: multiply the optimizer's ns clock by the platform time unit factor so
+        # the SDC gets the value in the platform's native unit (ps for asap7).
+        time_unit = PLATFORM_TIME_UNIT.get(platform, 1.0)
+        sdc_clk_value = clk_ns * time_unit
+        gen_sdc = cfgdir / f"constraint_{variant}.sdc"
+        gen_sdc.write_text(
+            re.sub(r"(?m)^set clk_period.*$",
+                   f"set clk_period    {sdc_clk_value}",
+                   base_sdc.read_text())
+        )
+
+        gen_cfg = cfgdir / f"config_{variant}.mk"
+        gen_cfg.write_text(_config_mk(platform, variant, lanes, acc_w,
+                                       util, density, abc, abc_recipe))
+        return gen_cfg
+
+    # ── Design-agnostic path ─────────────────────────────────────────────────
+    design_name = design.name
+    cfgdir = MAKE_DIR / platform / design_name
+    srcdir = MAKE_DIR / "src" / design_name
     srcdir.mkdir(parents=True, exist_ok=True)
     cfgdir.mkdir(parents=True, exist_ok=True)
 
-    for f in RTL_FILES:
-        shutil.copy(RTL_DIR / f, srcdir / f)
+    # Copy RTL files from design spec into src/<design_name>/
+    for src_path in design.rtl_files:
+        fname = Path(src_path).name
+        try:
+            shutil.copy(src_path, srcdir / fname)
+        except OSError as exc:
+            raise FileNotFoundError(
+                f"RTL file not found for design '{design_name}': {src_path}"
+            ) from exc
 
-    base_sdc = cfgdir / "constraint.sdc"
-    if not base_sdc.exists():
-        raise FileNotFoundError(
-            f"base SDC missing: {base_sdc} (expected from physical/orfs/make/{platform}/{DESIGN}/)"
-        )
-    # V1: multiply the optimizer's ns clock by the platform time unit factor so
-    # the SDC gets the value in the platform's native unit (ps for asap7).
+    # V1: multiply ns clock by platform time unit factor
     time_unit = PLATFORM_TIME_UNIT.get(platform, 1.0)
     sdc_clk_value = clk_ns * time_unit
+
+    # Generate SDC from DesignSpec template
     gen_sdc = cfgdir / f"constraint_{variant}.sdc"
-    gen_sdc.write_text(
-        re.sub(r"(?m)^set clk_period.*$", f"set clk_period    {sdc_clk_value}", base_sdc.read_text())
-    )
+    gen_sdc.write_text(design.sdc_text(platform, sdc_clk_value))
 
     gen_cfg = cfgdir / f"config_{variant}.mk"
-    gen_cfg.write_text(_config_mk(platform, variant, lanes, acc_w, util, density, abc, abc_recipe))
+    gen_cfg.write_text(_config_mk(platform, variant, lanes, acc_w,
+                                   util, density, abc, abc_recipe,
+                                   design=design, knob_values=knob_values))
     return gen_cfg
 
 
@@ -302,7 +513,9 @@ def _stage_inputs(platform: str, variant: str, lanes: int, acc_w: int, clk_ns: f
 
 def run_physical(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangate45",
                  util: int = 40, density: float = 0.60,
-                 abc: str | None = None, abc_recipe: str | None = None) -> dict:
+                 abc: str | None = None, abc_recipe: str | None = None,
+                 design: "Any | None" = None,
+                 knob_values: "dict | None" = None) -> dict:
     """Run the full RTL→GDS flow for one config and return parsed metrics.
 
     Deterministic for a fixed RTL + PDK + flow params, so cached in an explicit
@@ -334,13 +547,24 @@ def run_physical(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangate
             "Use run_synth_sta(..., abc_recipe='plain') for the F2 proxy instead."
         )
 
-    cache_key = (lanes, acc_w, float(clk_ns), platform, util, float(density), resolved_recipe)
+    # V12: design default is tinymac_accel; None is allowed for backward compat
+    # (callers that don't pass design get identical behaviour to before V12).
+    eff_design = design  # may be None; _stage_inputs / variant_name handle None
+
+    # Include design name and knob_values in cache key to avoid cross-design collisions.
+    design_name_key = getattr(eff_design, "name", "tinymac_accel")
+    kv_key: tuple = tuple(sorted((knob_values or {}).items()))
+    cache_key = (design_name_key, lanes, acc_w, float(clk_ns), platform,
+                 util, float(density), resolved_recipe, kv_key)
     if cache_key in _physical_cache:
         return _physical_cache[cache_key]
 
-    variant = variant_name(lanes, acc_w, clk_ns, util, density, abc_recipe=resolved_recipe)
+    var = variant_name(lanes, acc_w, clk_ns, util, density,
+                       abc_recipe=resolved_recipe, design=eff_design,
+                       knob_values=knob_values)  # V13: knob_values in dir name
+    actual_design_name = design_name_key
     base = {"lanes": lanes, "acc_w": acc_w, "clk_ns": float(clk_ns),
-            "platform": platform, "variant": variant,
+            "platform": platform, "variant": var, "design": actual_design_name,
             "core_utilization": util, "place_density": density,
             "abc": abc, "abc_recipe": resolved_recipe}
 
@@ -355,9 +579,10 @@ def run_physical(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangate
             f"ORFS not found at {ORFS_DIR} (set ORFS_DIR, or PHYSICAL_MOCK=1 to test offline)"
         )
 
-    gen_cfg = _stage_inputs(platform, variant, lanes, acc_w, clk_ns, util, density,
-                            abc_recipe=resolved_recipe)
-    gds = MAKE_DIR / "results" / platform / DESIGN / variant / "6_final.gds"
+    gen_cfg = _stage_inputs(platform, var, lanes, acc_w, clk_ns, util, density,
+                            abc_recipe=resolved_recipe,
+                            design=eff_design, knob_values=knob_values)
+    gds = MAKE_DIR / "results" / platform / actual_design_name / var / "6_final.gds"
 
     flow_status = "ok"
     if not gds.exists():
@@ -365,7 +590,7 @@ def run_physical(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangate
             f"source '{env_sh}' && "
             f"make --file='{ORFS_DIR}/flow/Makefile' "
             f"FLOW_HOME='{ORFS_DIR}/flow' WORK_HOME='{MAKE_DIR}' "
-            f"DESIGN_CONFIG='{gen_cfg}' FLOW_VARIANT='{variant}'"
+            f"DESIGN_CONFIG='{gen_cfg}' FLOW_VARIANT='{var}'"
         )
         # V10: use Popen + communicate(timeout) + start_new_session so we can
         # kill the entire process group on TimeoutExpired (not just the bash wrapper).
@@ -383,7 +608,7 @@ def run_physical(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangate
             except (ProcessLookupError, PermissionError):
                 pass
             proc.wait()
-            log_path = MAKE_DIR / f"opt_{variant}.log"
+            log_path = MAKE_DIR / f"opt_{var}.log"
             log_path.write_text(f"[TIMEOUT after {ORFS_TIMEOUT}s]\n")
             # V10: return TIMEOUT status (never raise); do NOT cache so the config
             # can be retried and the agent can update on it.
@@ -394,13 +619,14 @@ def run_physical(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangate
                     "timing_met": None, "gds": None, "report": str(log_path)}
 
         # Persist the flow output so a failure is debuggable.
-        (MAKE_DIR / f"opt_{variant}.log").write_text(
+        (MAKE_DIR / f"opt_{var}.log").write_text(
             (stdout or "") + "\n--- stderr ---\n" + (stderr or "")
         )
         if proc.returncode != 0:
             flow_status = "FAIL"
 
-    metrics = _parse_metrics(MAKE_DIR, platform, variant, clk_ns)
+    metrics = _parse_metrics(MAKE_DIR, platform, var, clk_ns,
+                             design_name=actual_design_name)
     # V2: _parse_metrics now sets status="PARSE_FAIL" if essential metrics are
     # missing; honour that over the flow_status, and also catch the case where
     # the report file is absent.
@@ -475,7 +701,8 @@ def run_elaborate(lanes: int, acc_w: int, platform: str = "nangate45") -> dict:
 
 def _yosys_synth_script(lanes: int, acc_w: int, lib: Path, netlist: Path,
                         abc_recipe: str = "orfs_speed", platform: str = "nangate45",
-                        clk_ns: float | None = None, work_dir: Path | None = None) -> str:
+                        clk_ns: float | None = None, work_dir: Path | None = None,
+                        design: "Any | None" = None) -> str:
     """Return a Yosys synthesis script string.
 
     Stage-B recipe extension: the abc command is now recipe-aware.
@@ -492,9 +719,33 @@ def _yosys_synth_script(lanes: int, acc_w: int, lib: Path, netlist: Path,
     Written to a .ys file (not passed via -p): yosys's command tokenizer does
     NOT strip shell quotes, so paths are left UNQUOTED — safe here as no path
     in this flow contains spaces.  Same chparam mechanism ORFS uses.
+
+    V12: when design is a DesignSpec, uses design.rtl_files and design.top;
+    also emits chparam for each axis in design.params using the caller's
+    lanes/acc_w as the LANES/ACC_W values respectively.
     """
     resolved = resolve_recipe(abc_recipe)
-    rtl = " ".join(str(RTL_DIR / f) for f in RTL_FILES)
+
+    if design is None:
+        # Legacy tinymac path
+        rtl = " ".join(str(RTL_DIR / f) for f in RTL_FILES)
+        top = DESIGN
+        chparam_lines = [
+            f"chparam -set LANES {lanes} {top}",
+            f"chparam -set ACC_W {acc_w} {top}",
+        ]
+    else:
+        rtl = " ".join(design.rtl_files)
+        top = design.top
+        # Emit chparam for each param the design has; resolve RTL name via rtl_param_name.
+        # Each pspec may carry 'rtl_param_name'; if absent the param key is the RTL name.
+        chparam_lines = []
+        for pname, pspec in (design.params or {}).items():
+            rtl_name = pspec.get("rtl_param_name", pname) if isinstance(pspec, dict) else pname
+            if rtl_name == "LANES" or pname in ("LANES", "mac_lanes"):
+                chparam_lines.append(f"chparam -set LANES {lanes} {top}")
+            elif rtl_name == "ACC_W" or pname in ("ACC_W", "accumulator_width"):
+                chparam_lines.append(f"chparam -set ACC_W {acc_w} {top}")
 
     if resolved == "plain":
         abc_cmd = f"abc -liberty {lib}"
@@ -507,9 +758,8 @@ def _yosys_synth_script(lanes: int, acc_w: int, lib: Path, netlist: Path,
 
     return "\n".join([
         f"read_verilog -sv {rtl}",
-        f"chparam -set LANES {lanes} {DESIGN}",
-        f"chparam -set ACC_W {acc_w} {DESIGN}",
-        f"synth -top {DESIGN} -flatten",
+        *chparam_lines,
+        f"synth -top {top} -flatten",
         f"dfflibmap -liberty {lib}",
         abc_cmd,
         "opt_clean -purge",
@@ -519,7 +769,8 @@ def _yosys_synth_script(lanes: int, acc_w: int, lib: Path, netlist: Path,
     ])
 
 
-def _sta_script(lefs: list[Path], lib: Path, netlist: Path, sdc: Path) -> str:
+def _sta_script(lefs: list[Path], lib: Path, netlist: Path, sdc: Path,
+                top: str = DESIGN) -> str:
     # Pre-layout STA in OpenROAD: cell delays only (optimistic, no net RC), but
     # fast and — unlike the routed flow — target-clock-independent, so Fmax is a
     # fair cross-config speed metric.  OpenROAD's link_design needs a technology,
@@ -530,7 +781,7 @@ def _sta_script(lefs: list[Path], lib: Path, netlist: Path, sdc: Path) -> str:
         lef_lines
         + f"read_liberty {lib}\n"
         + f"read_verilog {netlist}\n"
-        + f"link_design {DESIGN}\n"
+        + f"link_design {top}\n"
         + f"read_sdc {sdc}\n"
         + "report_clock_min_period\n"
         + "report_wns\n"
@@ -539,13 +790,22 @@ def _sta_script(lefs: list[Path], lib: Path, netlist: Path, sdc: Path) -> str:
 
 
 def run_synth_sta(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangate45",
-                  abc: str | None = None, abc_recipe: str | None = None) -> dict:
+                  abc: str | None = None, abc_recipe: str | None = None,
+                  design: "Any | None" = None,
+                  knob_values: "dict | None" = None) -> dict:
     """Fast proxy: synthesise (Yosys) + static-timing (OpenROAD), no P&R.
 
     Stage-B recipe extension:
       abc_recipe (new): canonical recipe {orfs_speed, orfs_area, plain}.
       abc (legacy):  'speed'/'area' aliases; abc_recipe wins when both given.
       Default: orfs_speed (ORFS default — same script as the full flow uses).
+
+    V12: design (DesignSpec | None): when None, uses tinymac_accel behaviour.
+    When provided, uses the design's RTL files, top module, and clock port.
+    knob_values: ORFS knob dict — validated and emitted into config.mk.
+
+    Also detects macros from synth stat when design.has_macros is None:
+    sets result["has_macros_detected"] = True/False.
 
     For orfs_speed/area the proxy uses the same ORFS abc_{speed,area}.script
     with the same -constr file as the full flow (F2 and F3 share recipes),
@@ -559,13 +819,20 @@ def run_synth_sta(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangat
     factor to approximate die area; timing is pre-layout (optimistic).
     """
     resolved_recipe = resolve_recipe(abc_recipe=abc_recipe, abc=abc)
-    cache_key = (lanes, acc_w, float(clk_ns), platform, resolved_recipe)
+
+    eff_design = design
+    design_name_key = getattr(eff_design, "name", "tinymac_accel")
+    kv_key: tuple = tuple(sorted((knob_values or {}).items()))
+    cache_key = (design_name_key, lanes, acc_w, float(clk_ns), platform,
+                 resolved_recipe, kv_key)
     if cache_key in _synth_sta_cache:
         return _synth_sta_cache[cache_key]
 
-    variant = variant_name(lanes, acc_w, clk_ns, abc_recipe=resolved_recipe)
+    var = variant_name(lanes, acc_w, clk_ns, abc_recipe=resolved_recipe,
+                       design=eff_design,
+                       knob_values=knob_values)  # V13: knob_values in dir name
     base = {"lanes": lanes, "acc_w": acc_w, "clk_ns": float(clk_ns),
-            "platform": platform, "variant": variant,
+            "platform": platform, "variant": var, "design": design_name_key,
             "abc": abc, "abc_recipe": resolved_recipe}
 
     if os.environ.get("PHYSICAL_MOCK"):
@@ -584,21 +851,26 @@ def run_synth_sta(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangat
     lib  = ORFS_DIR / "flow" / lib_rel
     lefs = [ORFS_DIR / "flow" / rel for rel in _LEF[platform]]
 
-    gen_cfg = _stage_inputs(platform, variant, lanes, acc_w, clk_ns)   # also writes the SDC
-    sdc = gen_cfg.parent / f"constraint_{variant}.sdc"
+    gen_cfg = _stage_inputs(platform, var, lanes, acc_w, clk_ns,
+                            design=eff_design, knob_values=knob_values)
+    sdc = gen_cfg.parent / f"constraint_{var}.sdc"
 
-    work = MAKE_DIR / "proxy" / variant
+    work = MAKE_DIR / "proxy" / var
     work.mkdir(parents=True, exist_ok=True)
     netlist = work / "netlist.v"
     synth_ys = work / "synth.ys"
     sta_tcl = work / "sta.tcl"
-    # Pass recipe, platform, clk_ns and work_dir so the constr file is written
+
+    # Determine the top module for the STA script
+    top_module = getattr(eff_design, "top", DESIGN) if eff_design is not None else DESIGN
+
+    # Pass recipe, platform, clk_ns, design, and work_dir so the constr file is written
     # inside the proxy work directory (same isolation as the full flow).
     synth_ys.write_text(_yosys_synth_script(lanes, acc_w, lib, netlist,
                                             abc_recipe=resolved_recipe,
                                             platform=platform, clk_ns=clk_ns,
-                                            work_dir=work))
-    sta_tcl.write_text(_sta_script(lefs, lib, netlist, sdc))
+                                            work_dir=work, design=eff_design))
+    sta_tcl.write_text(_sta_script(lefs, lib, netlist, sdc, top=top_module))
 
     # 1) synthesis (script FILE, not -p, to avoid shell-quoting issues; no -q,
     #    which would suppress the `stat` output we parse).
@@ -619,6 +891,26 @@ def run_synth_sta(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangat
     cell_area  = float(chip_all[-1]) if chip_all else None
     est_area   = round(cell_area * _PLACE_INFLATION, 1) if cell_area else None
 
+    # Macro auto-detect: check for "$" instances in synth stat (ORFS macro pattern).
+    # When design.has_macros is None, record detected value in the result.
+    # Research note: Yosys stat output includes "Number of cells: N" for std cells;
+    # macro instances appear as cells with "/" in their name or in hierarchy lines.
+    # More reliably: check for "DFFRAM" or "fakeram" or "$" cell type prefixes.
+    has_macros_detected: bool | None = None
+    if eff_design is not None and eff_design.has_macros is None:
+        synth_stdout = p1.stdout or ""
+        # Macro cells in Yosys stat are listed as "   <name>    N" under "Chip area..."
+        # AutoTuner research: macro presence detected by any cell with underscore-
+        # prefixed type (e.g. DFFRAM, fakeram, user_* macros). Simple heuristic:
+        # check if any line in stat matches a non-standard-cell pattern.
+        # We use a conservative check: any "$techmap" or named cell not in a std-cell
+        # lib (ie non-DFF/BUF/AND etc) implies macros. Simpler: check for "SRAM" or
+        # "RAM" or "fakeram" in the output.
+        macro_keywords = ("sram", "ram", "dffram", "fakeram", "macro")
+        has_macros_detected = any(
+            kw in synth_stdout.lower() for kw in macro_keywords
+        )
+
     # 2) static timing (OpenROAD, pre-layout)
     p2 = subprocess.run(
         ["bash", "-c", f"source '{env_sh}' && openroad -no_init -exit '{sta_tcl}'"],
@@ -627,13 +919,17 @@ def run_synth_sta(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangat
     sta_out = (p2.stdout or "")
     (work / "sta.log").write_text(sta_out + "\n--- stderr ---\n" + (p2.stderr or ""))
 
+    # V1: parse STA timing in the platform's native unit (ns for nangate45, ps for asap7).
+    time_div = PLATFORM_TIME_UNIT.get(platform, 1.0)
     fmax = period_min = None
     m = re.search(r"period_min\s*=\s*([\d.]+).*?fmax\s*=\s*([\d.]+)", sta_out)
     if m:
-        period_min = float(m.group(1))
+        period_min = float(m.group(1)) / time_div
         fmax = float(m.group(2))
-    wns = _last_float_on_line(sta_out, "wns")
-    tns = _last_float_on_line(sta_out, "tns")
+    wns_raw = _last_float_on_line(sta_out, "wns")
+    tns_raw = _last_float_on_line(sta_out, "tns")
+    wns = (wns_raw / time_div) if wns_raw is not None else None
+    tns = (tns_raw / time_div) if tns_raw is not None else None
     # Fallback fmax from slack if report_clock_min_period was unavailable.
     if fmax is None and wns is not None and clk_ns - wns > 0:
         period_min = round(clk_ns - wns, 3)
@@ -653,6 +949,10 @@ def run_synth_sta(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangat
         "timing_met": timing_met,
         "gds": None, "report": str(work / "sta.log"),
     }
+    # Include macro auto-detect result if applicable
+    if has_macros_detected is not None:
+        result["has_macros_detected"] = has_macros_detected
+
     # V10: only cache successful proxy results
     if result["status"] == "ok":
         _synth_sta_cache[cache_key] = result
