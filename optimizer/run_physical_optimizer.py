@@ -120,7 +120,12 @@ def main() -> None:
     else:
         env.clear_results()
 
-    agent = AGENTS[args.agent](env.search_space)
+    # UCB bounds wiring: pass reward_bounds from the env if available so the UCB
+    # agent's normalisation preserves the penalty ladder structure (V9 / Stage C).
+    agent_kwargs = {}
+    if args.agent == "ucb":
+        agent_kwargs["reward_bounds"] = getattr(env, "reward_bounds", None)
+    agent = AGENTS[args.agent](env.search_space, **agent_kwargs)
     if args.resume and env.history:
         agent.warm_start(env.history)
         print(f"Agent warm-started from {len(env.history)} records.")
@@ -142,6 +147,11 @@ def main() -> None:
             state, reward, _done, info = env.step(config)
             agent.update(config, reward, info)
             _print_trial(info)
+            # V10: TIMEOUT trials are logged by env.step and returned like any
+            # other trial (with their penalty reward) so the agent can avoid
+            # re-proposing the same config.
+            if info.get("metrics", {}).get("status") == "TIMEOUT":
+                print(f"  [TIMEOUT] trial {info.get('trial')} timed out; logged with penalty reward.")
             n_ok += 1
         except FileNotFoundError as exc:
             print(f"\n  [ERROR] {exc}\n")

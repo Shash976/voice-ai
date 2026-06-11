@@ -104,10 +104,12 @@ def _print_summary(history: list[dict]) -> None:
                 seen.add(key)
                 deduped.append(r)
         for r in deduped[:10]:
-            c, m = r["config"], r["metrics"]
-            print(f"  {c.get('mac_lanes'):>5} {c.get('accumulator_width'):>4} "
-                  f"{c.get('clock_period_ns'):>5} {c.get('core_utilization'):>4} "
-                  f"{c.get('place_density'):>5} {_fmt(m.get('area_um2'), '{:9.0f}')} "
+            c, m = r["config"], r.get("metrics") or {}
+            # Stage C: use _fmt for all config fields that may be None to avoid
+            # a crash when formatting None with a width spec (e.g. :>5).
+            print(f"  {_fmt(c.get('mac_lanes'), '{:>5}')} {_fmt(c.get('accumulator_width'), '{:>4}')} "
+                  f"{_fmt(c.get('clock_period_ns'), '{:>5}')} {_fmt(c.get('core_utilization'), '{:>4}')} "
+                  f"{_fmt(c.get('place_density'), '{:>5}')} {_fmt(m.get('area_um2'), '{:9.0f}')} "
                   f"{_fmt(m.get('fmax_mhz'), '{:7.1f}')} {_fmt(m.get('power_mw'), '{:7.0f}')} "
                   f"{r['reward']:>8.3f}")
     best = max(history, key=lambda x: x["reward"])
@@ -137,7 +139,12 @@ def main() -> None:
     else:
         env.clear_results()
 
-    agent = AGENTS[args.agent](env.search_space)
+    # UCB bounds wiring: pass reward_bounds from the env if available so the UCB
+    # agent's normalisation preserves the penalty ladder structure (V9 / Stage C).
+    agent_kwargs = {}
+    if args.agent == "ucb":
+        agent_kwargs["reward_bounds"] = getattr(env, "reward_bounds", None)
+    agent = AGENTS[args.agent](env.search_space, **agent_kwargs)
     if args.resume and env.history:
         agent.warm_start(env.history)
         print(f"Agent warm-started from {len(env.history)} records.")
