@@ -22,11 +22,11 @@ import json
 import time
 from pathlib import Path
 
-from env import OptEnv
-from physical_reward import behavioral_cycles, compute_physical_reward
-from physical_runner import run_physical, run_synth_sta
+from gen1.env import OptEnv
+from common.physical_reward import behavioral_cycles, compute_physical_reward
+from common.physical_runner import run_physical, run_synth_sta
 
-PHYS_RESULTS_FILE = Path(__file__).parent / "results_physical.jsonl"
+PHYS_RESULTS_FILE = Path(__file__).resolve().parent.parent / "results_physical.jsonl"
 
 
 class PhysicalOptEnv(OptEnv):

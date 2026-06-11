@@ -404,7 +404,7 @@ class Surrogate:
         correctness = -50.0 * (1.0 - accuracy)
 
         # Speedup from period_ns prediction
-        from constants import SW_BASELINE_CYCLES, behavioral_cycles
+        from common.constants import SW_BASELINE_CYCLES, behavioral_cycles
         SW_BASELINE_NS = SW_BASELINE_CYCLES * 10.0  # 100 MHz baseline
         cyc = behavioral_cycles(lanes)
         mu_period, sig_period = preds["period_ns"]

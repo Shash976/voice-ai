@@ -38,18 +38,19 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+import pathlib
 from pathlib import Path
 
-# Make optimizer/ importable when run as: python3 optimizer/run_optimizer.py
-sys.path.insert(0, str(Path(__file__).parent))
+# Bootstrap: make optimizer/ root importable (gen1/ is one level below it)
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from agents.bayesian_agent import BayesianAgent
-from agents.enumerate_agent import EnumerateAgent
-from agents.evo_agent import EvoAgent
-from agents.random_agent import RandomAgent
-from agents.ucb_agent import UCBAgent
-from env import RESULTS_FILE, OptEnv
-from runner import SW_BASELINE_CYCLES
+from gen1.agents.bayesian_agent import BayesianAgent
+from gen1.agents.enumerate_agent import EnumerateAgent
+from gen1.agents.evo_agent import EvoAgent
+from gen1.agents.random_agent import RandomAgent
+from gen1.agents.ucb_agent import UCBAgent
+from gen1.env import RESULTS_FILE, OptEnv
+from gen1.runner import SW_BASELINE_CYCLES
 
 AGENTS = {
     "enumerate": EnumerateAgent,
@@ -261,7 +262,7 @@ def main() -> None:
             n_skip += 1
 
     elapsed = time.time() - t_start
-    from runner import cache_info
+    from gen1.runner import cache_info
     print(f"\n  Completed {n_ok} trials ({n_skip} skipped) in {elapsed:.1f}s  |  {cache_info()}")
     _print_summary(env.history)
 

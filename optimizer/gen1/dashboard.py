@@ -43,11 +43,11 @@ import streamlit as st
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-RESULTS_FILE = Path(__file__).parent / "results.jsonl"
+RESULTS_FILE = Path(__file__).resolve().parent.parent / "results.jsonl"
 # Import SW_BASELINE_CYCLES from the single source of truth (constants.py).
 # Exposed as SW_BASELINE for backward compatibility with callers in this file.
 try:
-    from constants import SW_BASELINE_CYCLES as SW_BASELINE  # type: ignore[import]
+    from common.constants import SW_BASELINE_CYCLES as SW_BASELINE  # type: ignore[import]
 except ImportError:
     SW_BASELINE = 11_196_638   # fallback if constants.py unavailable (dashboard import)
 REFRESH_SEC  = 2

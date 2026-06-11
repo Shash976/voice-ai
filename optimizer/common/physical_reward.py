@@ -22,12 +22,12 @@ from __future__ import annotations
 
 import math
 
-from reward import SW_BASELINE_LATENCY_NS, acc_overflows
+from gen1.reward import SW_BASELINE_LATENCY_NS, acc_overflows
 # Single source of truth: cycle model constants come from constants.py.
 # Measured 2026-06-10 after V13 saturation-order fix.
 # Old values: _CYCLE_OVERHEAD=28000, _CYCLE_MAC_WORK=242000 (synthetic fit).
 # New values: fit to measured AVG_CYCLES over lanes {1,2,4,8,16,32}.
-from constants import _CYCLE_OVERHEAD, _CYCLE_MAC_WORK
+from common.constants import _CYCLE_OVERHEAD, _CYCLE_MAC_WORK
 
 # Real nangate45 LANES=4 ACC_W=24 anchors (the first full GDS): area/power terms
 # are normalised to ~1.0 here so the YAML weights carry over from the proxy reward.

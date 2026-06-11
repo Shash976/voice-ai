@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import math
 
-from constants import SW_BASELINE_CYCLES as _SW_BASELINE_CYCLES
+from common.constants import SW_BASELINE_CYCLES as _SW_BASELINE_CYCLES
 
 # TinyVAD worst-case signed accumulator magnitude
 # Conv0: K=200 (in_ch=40 × kern=5), max |product| = 128×128 = 16384

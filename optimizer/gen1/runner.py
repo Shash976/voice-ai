@@ -25,7 +25,7 @@ import warnings
 from functools import lru_cache
 from pathlib import Path
 
-_REPO    = Path(__file__).parent.parent
+_REPO    = Path(__file__).resolve().parent.parent.parent
 SIM_DIR  = _REPO / "sim" / "verilator"
 SIM_BIN  = SIM_DIR / "sim_picorv32"
 FIRMWARE = _REPO / "firmware" / "picorv32_baremetal" / "firmware.bin"
@@ -34,7 +34,7 @@ SIM_TIMEOUT = 120   # seconds
 
 # Stage-3 pure-SW per-inference baseline: import from constants.py (single source).
 # Re-measure via measure_real.py whenever the model, test vectors, or firmware changes.
-from constants import SW_BASELINE_CYCLES  # noqa: E402 (after path setup)
+from common.constants import SW_BASELINE_CYCLES  # noqa: E402 (after path setup)
 
 
 @lru_cache(maxsize=None)

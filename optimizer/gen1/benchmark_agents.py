@@ -30,18 +30,20 @@ try:
 except Exception:
     pass
 
-# Make `import reward` / `from agents...` work regardless of CWD.
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-if _THIS_DIR not in sys.path:
-    sys.path.insert(0, _THIS_DIR)
+# Bootstrap: make optimizer/ root importable (gen1/ is one level below it)
+import pathlib as _pl
+_THIS_DIR = str(_pl.Path(__file__).resolve().parent)
+_OPT_DIR  = str(_pl.Path(__file__).resolve().parents[1])
+if _OPT_DIR not in sys.path:
+    sys.path.insert(0, _OPT_DIR)
 
 import yaml  # noqa: E402
 
-import reward  # noqa: E402
-from agents.random_agent import RandomAgent  # noqa: E402
-from agents.evo_agent import EvoAgent  # noqa: E402
-from agents.ucb_agent import UCBAgent  # noqa: E402
-from constants import AVG_CYCLES as _AVG_CYCLES_ALL  # noqa: E402
+from gen1 import reward  # noqa: E402
+from gen1.agents.random_agent import RandomAgent  # noqa: E402
+from gen1.agents.evo_agent import EvoAgent  # noqa: E402
+from gen1.agents.ucb_agent import UCBAgent  # noqa: E402
+from common.constants import AVG_CYCLES as _AVG_CYCLES_ALL  # noqa: E402
 
 # ── Real measured offline sim model (matches the real sim exactly) ───────────────
 # avg_cycles: imported from constants.py (single source of truth).
@@ -116,7 +118,7 @@ def make_agent(name: str, search_space: dict, seed: int):
         agent = UCBAgent(search_space)
     elif name == "bayesian":
         try:
-            from agents.bayesian_agent import BayesianAgent
+            from gen1.agents.bayesian_agent import BayesianAgent
             agent = BayesianAgent(search_space, seed=seed)
         except Exception:
             return None

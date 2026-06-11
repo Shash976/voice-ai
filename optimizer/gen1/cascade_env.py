@@ -19,12 +19,12 @@ from pathlib import Path
 
 import yaml
 
-from cascade import evaluate
-from cascade_reward import compute_cascade_reward
-from env import OptEnv
+from gen1.cascade import evaluate
+from common.cascade_reward import compute_cascade_reward
+from gen1.env import OptEnv
 
-CASCADE_RESULTS_FILE = Path(__file__).parent / "results_cascade.jsonl"
-DEFAULT_SPACE = Path(__file__).parent / "search_space_full.yaml"
+CASCADE_RESULTS_FILE = Path(__file__).resolve().parent.parent / "results_cascade.jsonl"
+DEFAULT_SPACE = Path(__file__).resolve().parent / "search_space_full.yaml"
 
 
 class CascadeOptEnv(OptEnv):

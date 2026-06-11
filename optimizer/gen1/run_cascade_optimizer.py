@@ -27,7 +27,8 @@ import time
 from collections import Counter
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+import pathlib as _pl
+sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
 
 # The summary uses box-drawing/colour glyphs; make stdout UTF-8 so a Windows
 # cp1252 console (e.g. for --dry-run) doesn't crash on them.
@@ -36,12 +37,12 @@ try:
 except (AttributeError, ValueError):
     pass
 
-from agents.bayesian_agent import BayesianAgent
-from agents.evo_agent import EvoAgent
-from agents.random_agent import RandomAgent
-from agents.ucb_agent import UCBAgent
-from cascade import STAGE_ORDER
-from cascade_env import CASCADE_RESULTS_FILE, CascadeOptEnv
+from gen1.agents.bayesian_agent import BayesianAgent
+from gen1.agents.evo_agent import EvoAgent
+from gen1.agents.random_agent import RandomAgent
+from gen1.agents.ucb_agent import UCBAgent
+from gen1.cascade import STAGE_ORDER
+from gen1.cascade_env import CASCADE_RESULTS_FILE, CascadeOptEnv
 
 AGENTS = {"random": RandomAgent, "evo": EvoAgent, "ucb": UCBAgent, "bayesian": BayesianAgent}
 

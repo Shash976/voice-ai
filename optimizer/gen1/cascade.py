@@ -26,9 +26,9 @@ from __future__ import annotations
 
 import os
 
-from physical_runner import run_elaborate, run_physical, run_synth_sta
-from validate import validate
-from constants import behavioral_cycles as _behavioral_cycles, AVG_CYCLES as _AVG_CYCLES
+from common.physical_runner import run_elaborate, run_physical, run_synth_sta
+from common.validate import validate
+from common.constants import behavioral_cycles as _behavioral_cycles, AVG_CYCLES as _AVG_CYCLES
 
 STAGE_ORDER = ["validate", "elaborate", "sim", "proxy", "full"]
 
@@ -53,7 +53,7 @@ def _run_sim(lanes: int, acc_w: int) -> dict:
         cyc = float(_AVG_CYCLES[lanes]) if lanes in _AVG_CYCLES else _behavioral_cycles(lanes)
         return {"accuracy": acc, "correct": round(acc * 64), "n_total": 64,
                 "avg_cycles": cyc}
-    from runner import run_sim       # imported lazily: needs the Verilator binary
+    from gen1.runner import run_sim       # imported lazily: needs the Verilator binary
     return run_sim(lanes, acc_w)
 
 

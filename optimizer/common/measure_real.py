@@ -21,17 +21,18 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Make `import reward` work when run as: python3 optimizer/measure_real.py
-sys.path.insert(0, str(Path(__file__).parent))
+# Bootstrap: make optimizer/ root importable (common/ is one level below it)
+import pathlib as _pl
+sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
 try:
-    import reward as _R
+    from gen1 import reward as _R
 except Exception:  # pragma: no cover - reward import is optional for raw measurement
     _R = None
 
-REPO   = Path(__file__).parent.parent
+REPO   = Path(__file__).resolve().parent.parent.parent
 SIM    = REPO / "sim" / "verilator" / "sim_picorv32"
 FW     = REPO / "firmware" / "picorv32_baremetal" / "firmware.bin"
-OUT    = Path(__file__).parent / "sim_measurements.txt"
+OUT    = Path(__file__).resolve().parent / "sim_measurements.txt"
 
 # Sim timeout per run (one inference per process call = fast)
 TIMEOUT = 90

@@ -17,10 +17,10 @@ from pathlib import Path
 
 import yaml
 
-from reward import compute_proxies, compute_reward, real_speedup
-from runner import SW_BASELINE_CYCLES, run_sim
+from gen1.reward import compute_proxies, compute_reward, real_speedup
+from gen1.runner import SW_BASELINE_CYCLES, run_sim
 
-RESULTS_FILE = Path(__file__).parent / "results.jsonl"
+RESULTS_FILE = Path(__file__).resolve().parent.parent / "results.jsonl"
 
 
 def _load_yaml(path: str | Path) -> dict:

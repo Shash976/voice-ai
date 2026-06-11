@@ -22,9 +22,10 @@ from pathlib import Path
 import yaml
 
 # Make optimizer/ importable when run as: python optimizer/test_reward_sanity.py
-sys.path.insert(0, str(Path(__file__).parent))
+import pathlib as _pl
+sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
 
-import reward as R  # noqa: E402
+from gen1 import reward as R  # noqa: E402
 
 
 # ── Synthetic sim model (matches real sim behaviour) ──────────────────────────
@@ -209,7 +210,7 @@ def main() -> int:
     rmin, rmax = min(all_rewards), max(all_rewards)
     print(f"      reward range over space: [{rmin}, {rmax}]")
     try:
-        from agents.ucb_agent import _REWARD_LO, _REWARD_HI
+        from gen1.agents.ucb_agent import _REWARD_LO, _REWARD_HI
         check("UCB bounds bracket the realistic reward range "
               "(_REWARD_LO < rmin and rmax < _REWARD_HI)",
               _REWARD_LO < rmin and rmax < _REWARD_HI,
@@ -232,7 +233,7 @@ def main() -> int:
     except ImportError:
         print("      [SKIP] optuna not installed — skipping Bayesian test gracefully.")
     else:
-        from agents.bayesian_agent import BayesianAgent
+        from gen1.agents.bayesian_agent import BayesianAgent
         # Build proper search_space dict for the agent.
         raw = yaml.safe_load(
             (Path(__file__).parent / "search_space.yaml").read_text(encoding="utf-8"))

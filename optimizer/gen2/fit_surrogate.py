@@ -36,14 +36,19 @@ from pathlib import Path
 
 import numpy as np
 
+# Bootstrap: make optimizer/ root importable (gen2/ is one level below it)
+import pathlib as _pl
+import sys as _sys
+_sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
+
 # ── Paths ──────────────────────────────────────────────────────────────────────
 
-_REPO     = Path(__file__).resolve().parent.parent
+_REPO     = Path(__file__).resolve().parent.parent.parent
 _MAKE_DIR = _REPO / "physical" / "orfs" / "make"
 _RPT_DIR  = _MAKE_DIR / "reports" / "nangate45" / "tinymac_accel"
 _LOG_DIR  = _MAKE_DIR / "logs"    / "nangate45" / "tinymac_accel"
 _PROXY_DIR = _MAKE_DIR / "proxy"
-_OUT_MODEL = Path(__file__).parent / "surrogate_n45.joblib"
+_OUT_MODEL = Path(__file__).resolve().parent.parent / "surrogate_n45.joblib"
 
 # ── Vendored regexes from physical_runner.py (identical; keep in sync) ────────
 # Source: physical_runner._parse_metrics, checked 2026-06-11
@@ -310,7 +315,7 @@ def mine_training_rows() -> list[dict]:
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main():
-    from surrogate import Surrogate
+    from gen2.surrogate import Surrogate
 
     print("=" * 65)
     print("fit_surrogate.py — TinyMAC Surrogate CP3 validation")

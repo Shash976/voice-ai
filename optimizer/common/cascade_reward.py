@@ -13,7 +13,7 @@ retuning the funnel is data-driven — edit the YAML, no code change.
 
 from __future__ import annotations
 
-from physical_reward import compute_physical_reward
+from common.physical_reward import compute_physical_reward
 
 # V4: monotone penalty ladder — more information gained = less negative penalty.
 # invalid −100 < elaborate −80 < sim −60 < proxy −40 < full-flow-fail −20

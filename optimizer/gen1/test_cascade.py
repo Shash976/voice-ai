@@ -16,13 +16,14 @@ import sys
 from pathlib import Path
 
 os.environ.setdefault("PHYSICAL_MOCK", "1")
-sys.path.insert(0, str(Path(__file__).parent))
+import pathlib as _pl
+sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
 
 import yaml
 
-from cascade import STAGE_ORDER, evaluate
-from cascade_reward import compute_cascade_reward
-from validate import validate
+from gen1.cascade import STAGE_ORDER, evaluate
+from common.cascade_reward import compute_cascade_reward
+from common.validate import validate
 
 SPACE_PATH = Path(__file__).parent / "search_space_full.yaml"
 with open(SPACE_PATH, encoding="utf-8") as f:
@@ -124,8 +125,8 @@ check("full success reward is positive", r_full > 0)
 
 # ── 5. end-to-end agent loop (evo) over the big space ──────────────────────────
 print("\n[5] end-to-end optimizer loop (mock, evo)")
-from agents.evo_agent import EvoAgent
-from cascade_env import CascadeOptEnv
+from gen1.agents.evo_agent import EvoAgent
+from gen1.cascade_env import CascadeOptEnv
 
 env = CascadeOptEnv(platform="nangate45", max_stage="full")
 env.clear_results()
