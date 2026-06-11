@@ -41,7 +41,7 @@ python sw/tinyml_reference/gen_test_vectors.py     # → firmware/tinyengine_por
 ```bash
 cd firmware/tinyengine_port
 make host                # gcc → ./test_infer_host
-./test_infer_host        # expect: all vectors pass, max error ≤ 2 LSB
+./test_infer_host        # expect: 64/64 pass, max logit error ≤ 3 LSB
 make clean
 ```
 **This is the fastest "is it alive?" check.** Do this first.
@@ -62,9 +62,10 @@ Run the built sim directly with different accelerator knobs (no rebuild):
 ```bash
 cd sim/verilator
 ./sim_picorv32 firmware.bin                          # defaults: 8 lanes, 32-bit acc
-./sim_picorv32 firmware.bin --mac-lanes 16           # 16 lanes  → ~258× speedup
+./sim_picorv32 firmware.bin --mac-lanes 16           # 16 lanes  → ~240× speedup
 ./sim_picorv32 firmware.bin --mac-lanes 1            # 1 lane    → slowest accel
-./sim_picorv32 firmware.bin --acc-width 16           # 16-bit acc → accuracy drops to 47/64
+./sim_picorv32 firmware.bin --acc-width 16           # 16-bit acc → accuracy drops to 47–58/64
+                                                     #   (lane-dependent: saturation is per-chunk, like the RTL)
 ./sim_picorv32 firmware.bin --vcd out.vcd            # waveform dump
 ```
 
@@ -99,7 +100,7 @@ There are **two tracks** (see `docs/04_optimizer.md`):
 🪟 **Windows — offline, no sim needed** (quickest Stage-5 demo):
 ```powershell
 python optimizer/benchmark_agents.py     # agent comparison + honest "no agent beats random" verdict
-python optimizer/test_reward_sanity.py   # 13/13 reward-function invariants
+python optimizer/test_reward_sanity.py   # 16/16 reward-function invariants
 ```
 
 🐧 **WSL — live optimizer** (needs sim_picorv32 + firmware.bin built first):
@@ -145,6 +146,19 @@ Live dashboard (separate terminal):
 streamlit run optimizer/dashboard.py
 ```
 
+**Second-generation funnel optimizer** (see `docs/08_funnel_optimizer.md`) —
+promotion decisions become trainable actions, a surrogate model sits between the
+fidelities, and the space is reduced to the axes that measurably matter
+(lanes × acc_width × clock × ABC recipe; utilization/density fixed):
+
+```bash
+python3 optimizer/build_table.py --subset strategic    # offline F0–F2 table, 84 configs ~1.2 h (resumable)
+python3 optimizer/build_table.py --dry-run             # show plan + cost estimate first
+python3 optimizer/fit_surrogate.py                     # fit + cross-validate the surrogate on all built data
+python3 optimizer/benchmark_funnel.py --seeds 20       # random vs fixed-gate vs LinUCB on the table simulator
+PHYSICAL_MOCK=1 python3 optimizer/funnel.py            # FunnelEnv self-test (no tools needed)
+```
+
 ---
 
 ## 5. Stage 6 — RTL → GDS  🚧 GDS produced
@@ -152,7 +166,7 @@ streamlit run optimizer/dashboard.py
 RTL is written (`rtl/accel/`), bit-exact-verified, and a full nangate45 GDS has been
 produced via the classic ORFS make flow on the company VM
 (`/opt/OpenROAD-flow-scripts`). Numbers: LANES=4 ACC_W=24 → ~19,738 µm², ~269 MHz
-Fmax, 231 FFs. See `docs/06_rtl_to_gds.md` for details.
+Fmax, 230 FFs. See `docs/06_rtl_to_gds.md` for details.
 
 **RTL unit tests** (Verilator, runs anywhere):
 ```bash
@@ -190,17 +204,19 @@ PHYSICAL_MOCK=1 python3 optimizer/run_physical_optimizer.py --agent random --tri
 
 | Command | Healthy result |
 |---------|----------------|
-| `./test_infer_host` | all vectors pass, max error ≤ 2 LSB |
-| `make run` (accel on, 8 lanes) | `correct=64/64 avg_cycles≈58–66K`¹ |
-| `./sim_picorv32 ... --mac-lanes 16` | `correct=64/64`, ~43–49K cycles¹ |
-| `./sim_picorv32 ... --acc-width 16` | `correct=47/64` (overflow, expected) |
+| `./test_infer_host` | 64/64 pass, max logit error ≤ 3 LSB |
+| `make run` (accel on, 8 lanes) | `correct=64/64 avg_cycles≈61.4K` |
+| `./sim_picorv32 ... --mac-lanes 16` | `correct=64/64`, ~46.7K cycles |
+| `./sim_picorv32 ... --acc-width 16` | `correct=47–58/64` (overflow; lane-dependent, expected) |
 | `benchmark_agents.py` | "No agent meaningfully beats random search" |
-| `test_reward_sanity.py` | 13/13 checks pass |
+| `test_reward_sanity.py` | 16/16 checks pass |
 | `cd rtl/tb && make` | `45/45 PASS  0 mismatches` |
 | `synth_area.sh nangate45` | LANES=1: ~12.3K µm² → LANES=16: ~22.9K µm² |
+| `PHYSICAL_MOCK=1 python3 optimizer/funnel.py` | "All self-tests PASSED" |
+| `python3 optimizer/fit_surrogate.py` | CV Spearman ρ ≥ 0.8 area, ≥ 0.7 period |
 
-¹ Cycle counts pending WSL rebuild with the updated cycle model (`ACCEL_CH_OVERHEAD=2`,
-~12.5% higher than old `ceil(M·K/LANES)` formula). Re-pin with `measure_real.py` after.
+(Per-lane cycle counts are pinned in `optimizer/constants.py` from real sweeps —
+`measure_real.py` regenerates them after any sim/RTL cycle-model change.)
 
 ---
 
@@ -213,7 +229,7 @@ PHYSICAL_MOCK=1 python3 optimizer/run_physical_optimizer.py --agent random --tri
 3. **`make run` shows huge speedup "for free"** → hooks are ON by default; you're
    measuring the *accelerated* path, not the baseline.
 4. **16-bit accumulator "passes" on vec 0** → it doesn't overflow on vec 0. Always
-   check the full 64-vector run (16-bit → 47/64).
+   check the full 64-vector run (16-bit → 47–58/64, lane-dependent).
 5. **Firmware traps at reset** → PIE/GOT or build-id flags missing/changed. See
    doc 02's build-flag section.
 6. **`runner.py` can't find the sim** → build it in WSL first:

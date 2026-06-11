@@ -5,9 +5,10 @@ Stage 6 turns the accelerator from a **C++ behavioral model** (Stage 4) into
 get a real chip layout (GDS) plus area / timing / power numbers.
 
 > **Status: working.** A full nangate45 GDS of `tinymac_accel` has been produced
-> via the classic ORFS `make` flow. RTL is bit-exact-verified; synthesis, place,
-> route, and GDS all run. Numbers below are real. Remaining: realistic-clock
-> re-sweep, asap7 retarget, and wiring the sweep to the Stage-5 optimizer.
+> via the classic ORFS `make` flow, and a first **asap7 GDS** as well (1.0 ns
+> constraint: 1433 µm², Fmax 509 MHz). RTL is bit-exact-verified; synthesis,
+> place, route, and GDS all run, and the Stage-5 optimizer drives the flow
+> directly. Remaining: realistic-clock re-sweep and requantize pipelining.
 >
 > Synthesis/lint run anywhere with Yosys; the full P&R→GDS flow runs where a real
 > OpenROAD lives (the company VM at `/opt/OpenROAD-flow-scripts`).
@@ -51,14 +52,17 @@ needs (`o_m`, `o_k_base`) and consumes operands provided combinationally by the
 environment — the same 0-wait-state model the Stage-4 testbench uses for RAM. A
 DMA/MMIO front-end that fetches from real memory is a separate, later concern.
 
-### Accumulator saturation — a subtlety vs the behavioral model
+### Accumulator saturation — behavioral model now matches the RTL
 
-The behavioral model (`sim_main.cpp accel_saturate`) saturates **per MAC**. The
-RTL saturates the accumulator **per chunk** (after each `LANES`-wide adder-tree
-sum) — which is what parallel hardware actually does. At `ACC_W ≥ 24` no TinyVAD
-layer ever overflows, so both policies give identical results; at `ACC_W = 32`
-there is no saturation at all. The unit test verifies bit-exactness against a
-golden that uses the RTL's per-chunk order.
+The RTL saturates the accumulator **per chunk** (after each `LANES`-wide
+adder-tree sum) — which is what parallel hardware actually does. The behavioral
+model (`sim_main.cpp`) originally saturated per MAC; it has been **changed to the
+RTL's per-chunk order** so the two agree exactly (verified against the RTL FSM
+and the testbench golden, including the partial last chunk when `K` isn't a
+multiple of `LANES`). At `ACC_W ≥ 24` no TinyVAD layer ever overflows, so the
+policies were already identical there; at `ACC_W = 16` the difference is real and
+makes accuracy **lane-count-dependent** (measured 47/64 at 1 lane up to 58/64 at
+32 lanes — wider chunks overflow less often mid-channel).
 
 ---
 
@@ -91,8 +95,9 @@ honest Stage-6 finding: the idealized speedup slightly overstates hardware.
 
 **Backported to the behavioral sim.** `sim_main.cpp` now models this overhead
 (`ACCEL_CH_OVERHEAD = 2`): latency = `n_outputs × (ceil(K/LANES) + 2)` instead of
-`ceil(M·K/LANES)`. Rebuild the WSL sim to see updated cycle counts and re-pin the
-optimizer constants with `measure_real.py`.
+`ceil(M·K/LANES)`. The sim is rebuilt and the measured constants are pinned in
+`optimizer/constants.py` (8 lanes: 61,400 cycles/inference; 16 lanes: 46,670 —
+see the full per-lane table there).
 
 ---
 
@@ -119,14 +124,22 @@ The unit testbench confirmed each fix left the math bit-identical.
 
 Two routes were tried:
 
-- **bazel-orfs** (`physical/orfs/BUILD.bazel`, `sync.sh`) — the modern Bazel
-  driver. **Abandoned**: its gallery workspace fetches a Python stack from PyPI
-  and the networks available timed out, aborting before synthesis. Files kept for
-  reference only.
+- **bazel-orfs** — the modern Bazel driver. **Abandoned**: its gallery workspace
+  fetches a Python stack from PyPI and the networks available timed out, aborting
+  before synthesis. Its files (`BUILD.bazel`, `sync.sh`, a root `constraints.sdc`)
+  have been removed from the repo; this note is the record.
 - **Classic ORFS `make` flow** (`physical/orfs/make/`) — the working path. The
   company VM has a full OpenROAD at `/opt/OpenROAD-flow-scripts`. A design is just
   three files (`config.mk`, `constraint.sdc`, the RTL); `run.sh` stages them and
   invokes the ORFS Makefile through to GDS. **This is what produced the layout.**
+
+> **asap7 unit gotcha (now handled in code):** asap7's liberty/SDC time unit is
+> **picoseconds**, not nanoseconds — an asap7 SDC saying `5.0` constrains the
+> design to 5 *ps*. `physical_runner.py` owns the conversion in both directions
+> (`PLATFORM_TIME_UNIT`): optimizer clock values are always ns, SDC writes are
+> scaled per platform, and parsed report times are normalized back to ns before
+> storage. An earlier batch of asap7 results predating this fix was invalid and
+> lives quarantined in `optimizer/results_physical_INVALID_psbug.jsonl`.
 
 ```bash
 # one config, full RTL→GDS:
@@ -174,7 +187,7 @@ First complete layout — `6_final.gds`, viewable in KLayout / the OpenROAD GUI:
 | Metric | Value | Note |
 |--------|-------|------|
 | Design area | **19,738 µm²** | post-place, 48% utilization |
-| Flip-flops | 231 | matches RTL state |
+| Flip-flops | 230 | matches RTL state (`finish` report, sequential cell count) |
 | **Fmax** | **~269 MHz** (period_min 3.72 ns) | the real achievable speed |
 | WNS @ 2.0 ns target | **−1.72 ns (VIOLATED)** | 2.0 ns was too aggressive |
 | Setup violations @ 2 ns | 40 | all on the requantize path |
@@ -204,27 +217,56 @@ PHYSICAL_MOCK=1 python3 optimizer/run_physical_optimizer.py --agent random --tri
 
 | Module | Role |
 |--------|------|
-| `optimizer/physical_runner.py` | runs one config through ORFS (reuses `sweep.sh`'s mechanism), parses area/WNS/Fmax/power from the real reports. `lru_cache`d; `PHYSICAL_MOCK=1` for offline tests |
-| `optimizer/physical_reward.py` | reward over **measured** metrics: speedup = behavioral cycles × real achieved clock (`max(clk, 1000/Fmax)`), real area/power, real timing_met. Same weights as the sim reward |
-| `optimizer/physical_env.py` | `PhysicalOptEnv(OptEnv)` — swaps the evaluation, reuses every agent and the search space |
+| `optimizer/physical_runner.py` | runs one config through ORFS (reuses `sweep.sh`'s mechanism), parses area/WNS/Fmax/power from the real reports. `PHYSICAL_MOCK=1` for offline tests |
+| `optimizer/physical_reward.py` | reward over **measured** metrics only: speedup uses the real achieved Fmax (missing Fmax ⇒ zero speedup, never the requested clock), real area/power, real timing_met. Same weights as the sim reward |
+| `optimizer/physical_env.py` | `PhysicalOptEnv(OptEnv)` — swaps the evaluation, reuses every agent; forwards *all* config axes (lanes/acc_w/clk/util/density/abc recipe) |
 | `optimizer/run_physical_optimizer.py` | CLI; logs to `results_physical.jsonl` |
+
+Robustness properties of the runner (each one earned by a bug):
+
+- **Variant naming**: `L4_A24_c5_r<8-hex>` — parameters plus a content hash of the
+  RTL sources, so editing the RTL invalidates every cached build instead of
+  silently returning stale metrics. Clock formatting (`{:.4g}`) keeps 1.25 and
+  1.2 distinct.
+- **Failure visibility**: a report that parses to nothing is `PARSE_FAIL`, a
+  timed-out flow is `TIMEOUT` (its whole process group is killed — no orphaned
+  yosys/openroad), and both are logged and scored with penalties; only `ok`
+  results are cached.
+- **Units**: all stored times are ns regardless of platform (see the asap7 note
+  above).
 
 Each non-cached trial is a full place-and-route (minutes), so keep trial counts
 modest; distinct configs and already-built variants are cached/reused. This is
 the plan's Stage-5↔6 loop: the agent proposes a chip config, the tools build it,
-the real metrics feed the reward, the agent picks the next one.
+the real metrics feed the reward, the agent picks the next one. The
+second-generation funnel ([doc 08](08_funnel_optimizer.md)) builds on exactly
+this plumbing.
 
 > This code was independently reviewed for hallucinated APIs and wrong ORFS
 > assumptions before landing; the report parsers were checked against real VM
 > report strings, and the loop validated end-to-end in mock mode.
 
+### First asap7 result (the project's 7 nm-class target)
+
+With the unit conversion in place, the first asap7 full flow runs clean —
+LANES=4, ACC_W=24, 1.0 ns constraint:
+
+| Metric | asap7 @ 1.0 ns | nangate45 @ 2.0 ns (for scale) |
+|--------|----------------|--------------------------------|
+| Design area | **1433 µm²** | 19,738 µm² |
+| Fmax | **509 MHz** (period_min 1.96 ns) | ~269 MHz |
+| WNS | −0.96 ns (constraint aggressive, as intended) | −1.72 ns |
+| GDS | `6_final.gds` produced, ~9 min | produced |
+
 ### Still to do
 
-- ~~Backport per-channel cycle overhead to `sim_main.cpp`~~ — **done** (`ACCEL_CH_OVERHEAD=2`
-  in `sim_main.cpp`; rebuild WSL sim + re-run `measure_real.py` to update live numbers).
-- Re-sweep at a **realistic clock** (≈4 ns) so configs meet timing, and/or sweep
-  the clock to map Fmax per config.
-- **asap7** (the project's 7nm-class target) — copy the nangate45 config dir, set
-  `PLATFORM = asap7`, pick a 7 nm-appropriate clock.
-- (Optional) pipeline the requantize multiply to lift Fmax (~2×) — the critical
-  path the timing report identified.
+- ~~Backport per-channel cycle overhead to `sim_main.cpp`~~ — **done**, sim rebuilt,
+  constants pinned in `optimizer/constants.py`.
+- ~~asap7 retarget~~ — **first GDS produced** (above); a 12-config sweep at
+  0.8–1.2 ns is the natural next batch and doubles as the surrogate's transfer
+  test set.
+- Re-sweep nangate45 at a **realistic clock** (≈4 ns) so configs meet timing,
+  and/or sweep the clock to map Fmax per config.
+- Pipeline the requantize multiply to lift Fmax (~2×) — the critical path the
+  timing report identified; no synthesis recipe moves it (measured), only this
+  RTL change does.

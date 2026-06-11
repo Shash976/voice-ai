@@ -1,5 +1,11 @@
 # 04 — The Design-Space Optimizer (Stage 5)
 
+> **This doc covers the first-generation optimizer** (the 45-config grid, the
+> agents, the cascade funnel with fixed gates). It is still accurate and all of
+> it still runs. The second generation — a multi-fidelity funnel with a learned
+> surrogate and a trainable promotion policy, plus the repairs that motivated
+> it — is documented in [08_funnel_optimizer.md](08_funnel_optimizer.md).
+
 Now that trying a hardware config is cheap (just re-run the behavioral sim with
 different flags), we can *automatically search* for the best accelerator design.
 **Runs on Windows** (pure Python; it shells out to the WSL-built sim, or uses an
@@ -85,10 +91,13 @@ higher power cost and trips the timing-violation penalty. See the long comment a
   fictitiously flagged high-lane configs as timing violations.
 
 The area/power terms remain **estimates**, clearly labeled as such, and become
-*real* numbers in Stage 6 ORFS (the timing term now already is one). The constants
-(`SW_BASELINE_CYCLES = 11,196,638`, `max_speedup = 576`) were pinned empirically —
-see [`../optimizer/measure_real.py`](../optimizer/measure_real.py) and the comments
-in the YAML/reward derivations.
+*real* numbers in Stage 6 ORFS (the timing term now already is one). All measured
+constants (`SW_BASELINE_CYCLES = 11,196,638`, the per-lane cycle table, the
+`behavioral_cycles(lanes)` fit, `max_speedup = 576`) live in one place —
+[`../optimizer/constants.py`](../optimizer/constants.py) — pinned empirically by
+[`../optimizer/measure_real.py`](../optimizer/measure_real.py), which sweeps the
+real Verilator sim over all lane counts. Every consumer (reward, runner,
+benchmark, cascade, dashboard) imports from there; nothing duplicates the numbers.
 
 ---
 
@@ -117,8 +126,12 @@ agent.update(config, reward, info)        # record the result
 | `bayesian` | `bayesian_agent.py` | Optuna TPE — needs `pip install optuna` (optional) |
 
 The UCB agent is well-documented (`ucb_agent.py:1`) — note its rewards are normalized
-to `[0,1]` with *fixed* bounds (`[−12, +4.5]`), never a running min (which would
-silently re-interpret history).
+to `[0,1]` with *fixed* bounds, never a running min (which would silently
+re-interpret history). The bounds are **per-track**: each env exposes a
+`reward_bounds` attribute (`(−12, 4.5)` for the behavioral track, `(−100, 4.5)`
+for the cascade/physical tracks whose failure-penalty ladder reaches −100) and the
+run scripts pass it through — otherwise the escalating penalties would all clamp
+to the same normalized value and be invisible to the bandit.
 
 ---
 
@@ -146,7 +159,7 @@ spaces. On a tiny deterministic grid, just enumerate it — which is exactly wha
 variance). The learning strategies are there for the larger cascade space below.
 
 There's also [`../optimizer/test_reward_sanity.py`](../optimizer/test_reward_sanity.py)
-— 13 offline invariant checks on the reward function (e.g. "a timing-violating config
+— 16 offline invariant checks on the reward function (e.g. "a timing-violating config
 never out-scores the same config clocked legally"). Runs on Windows, no sim needed.
 
 ---
@@ -157,7 +170,7 @@ never out-scores the same config clocked legally"). Runs on Windows, no sim need
 
 ```powershell
 python optimizer/benchmark_agents.py    # agent comparison + the honest verdict
-python optimizer/test_reward_sanity.py  # 13/13 reward invariants
+python optimizer/test_reward_sanity.py  # 16/16 reward invariants
 ```
 
 These are the quickest way to see Stage 5 work — they need only Python + pyyaml.
@@ -213,16 +226,18 @@ results.jsonl  (one record per trial)  ──> dashboard.py / run summary table
   is analytic. Buffers/dataflow were honestly dropped (no sim model → can't measure).
 - The reward's headline insight: use **frequency-aware real_speedup**, not raw cycle
   ratio, or the optimizer cheats by picking the slowest clock.
-- Grid optimum: `{lanes:4, acc:24, clk:5}`, reward ≈ 4.01.
+- Grid optimum: `{lanes:4, acc:24, clk:5}`, reward ≈ 4.0.
 - This is **DSE, not RL** — single-step black-box search, no MDP. On 45 configs the
   honest tool is `--agent enumerate`; **no learning strategy beats random** here.
   Agent value needs bigger/noisier spaces (the cascade track).
 - Quickest demo: `benchmark_agents.py` + `test_reward_sanity.py` (Windows, no sim).
-- The behavioral sim (`sim_main.cpp`) cycle model was updated to match RTL: latency =
-  `n_outputs × (ceil(K/LANES) + 2)` where `+2` is the per-channel overhead (bias load +
-  requantize). The old `ceil(M·K/LANES)` understated hardware by ~12.5% (FC0: 512 → 576
-  cycles). WSL rebuild needed to propagate to live optimizer runs; re-pin constants with
-  `measure_real.py` afterwards.
+- The behavioral sim (`sim_main.cpp`) matches the RTL on both counts that matter:
+  the cycle model (latency = `n_outputs × (ceil(K/LANES) + 2)`, the `+2` being
+  per-channel bias-load + requantize overhead the old `ceil(M·K/LANES)` formula
+  missed) **and** accumulator saturation order (per `LANES`-chunk, not per MAC —
+  which makes int16-accumulator accuracy lane-count-dependent: 47–58/64). The sim
+  is rebuilt and the measured constants are pinned in `optimizer/constants.py`
+  (8 lanes = 61,400 cycles/inf; 16 lanes = 46,670). Grid optimum unchanged.
 
 ---
 
@@ -268,7 +283,11 @@ full      (min)  full RTL→GDS: real area/timing/power        run_physical
 The reward ([`../optimizer/cascade_reward.py`](../optimizer/cascade_reward.py))
 gives an escalating penalty for early death (`stage_penalty` in the YAML) and the
 full multi-objective PPA reward for survivors — fed to the **same** agents
-(random/evo/ucb/bayesian), so they steer toward configs that reach deep.
+(random/evo/ucb/bayesian), so they steer toward configs that reach deep. The
+penalty ladder is **monotone in information gained**: invalid −100 < elaborate
+−80 < sim −60 < proxy −40 < full-flow-fail −20. (It originally scored a failure
+at full place-and-route as −100, the same as an invalid config — which taught
+agents to *avoid* deep progress.)
 
 ```bash
 python optimizer/run_cascade_optimizer.py --agent evo --trials 30        # full funnel
@@ -280,6 +299,11 @@ PHYSICAL_MOCK=1 python optimizer/test_cascade.py                         # offli
 The run prints **funnel attrition** (how many configs reached each stage) so you
 see where bad configs die — e.g. `acc_width<24` is killed at the cheap `sim` gate,
 never wasting a P&R.
+
+The cascade's promote/kill decisions are **hard-coded gates**. The second-generation
+optimizer ([doc 08](08_funnel_optimizer.md)) turns exactly those decisions into the
+actions of a trainable promotion policy, adds a learned surrogate between the
+fidelities, and reduces the space to the axes that measurably matter.
 
 ---
 
