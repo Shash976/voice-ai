@@ -11,7 +11,7 @@ A single RISC-V multiply takes 1–3 cycles and does *one* multiply. An **8-lane
 array** does 8 multiplies and accumulates them in **1 cycle**. For a matrix-vector
 multiply with 64×32 = 2048 MACs, that's an 8× win just from parallelism — plus you
 skip all the loop/pointer overhead the CPU was paying. Across the whole model that's
-~191× faster (8 lanes).
+~182× faster (8 lanes).
 
 The accelerator is a **memory-mapped peripheral**: the firmware programs it by
 *writing to specific addresses* (its registers), then triggers it. To the CPU it
@@ -134,8 +134,8 @@ The `+2` overhead per output channel accounts for bias load + requantize cycles 
 same per-channel overhead measured in the Stage-6 RTL (FC0: 512 idealized → 576 real).
 The old formula was `ceil(total_MACs / mac_lanes)` which ignored this overhead and
 understated hardware latency by ~12.5%. STATUS reads as busy (1) until
-`accel_done_at`. **WSL rebuild needed** to propagate this change to live sim runs;
-re-pin constants with `measure_real.py` after.
+`accel_done_at`. The sim is built with this model and the measured per-lane cycle
+counts are pinned in `optimizer/constants.py` (`measure_real.py` regenerates them).
 
 - `mac_lanes` is set at runtime via `--mac-lanes N` (default 8). See `sim_main.cpp:47`.
 - `acc_width` is set via `--acc-width N` (16/24/32, default 32). See below.
@@ -174,10 +174,10 @@ stdout is the same CSV as Stage 3 but with far fewer cycles and a real summary l
 
 ```
 vec,label,result,correct,logit0,logit1,cycles
-0,1,1,1,-42,18,58577
+0,1,1,1,-42,18,61399
 ...
 ---
-correct=64/64 avg_cycles=58577
+correct=64/64 avg_cycles=61399
 ```
 
 stderr logs each accelerator invocation (`[accel] cmd=2 M=32 K=40 ...`) — one per
@@ -191,14 +191,14 @@ Per inference, vs. the Stage-3 SW baseline (11,196,638 cycles):
 
 | | SW only | accel, 8 lanes | accel, 16 lanes |
 |---|---|---|---|
-| Cycles / inference | ~11.2 M | ~58–66 K¹ | ~43–49 K¹ |
-| Time @ 100 MHz | ~112 ms | ~0.6 ms | ~0.4 ms |
+| Cycles / inference | ~11.2 M | ~61.4 K | ~46.7 K |
+| Time @ 100 MHz | ~112 ms | ~0.61 ms | ~0.47 ms |
 | Accuracy | 64/64 | 64/64 | 64/64 |
-| **Speedup** | 1× | **~170–191×** ¹ | **~230–258×** ¹ |
+| **Speedup** | 1× | **~182×** | **~240×** |
 
-¹ Range reflects the cycle model update (`ACCEL_CH_OVERHEAD=2`). Lower bound is the
-new model; upper bound is the old `ceil(MACs/lanes)` formula. Exact numbers will be
-re-pinned after WSL rebuild + `measure_real.py`.
+Measured with the RTL-matched cycle model (`ACCEL_CH_OVERHEAD=2`: per-channel
+bias-load + requantize overhead). The full per-lane table (1→32 lanes:
+273,130 → 39,310 cycles) is pinned in `optimizer/constants.py`.
 
 Notice 16 lanes is *not* 2× faster than 8: the convolution/dense work doesn't divide
 evenly, and fixed per-channel overhead dominates at high lane counts. This diminishing
