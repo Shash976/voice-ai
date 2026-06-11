@@ -58,10 +58,20 @@ from typing import Any
 
 import numpy as np
 
+# ── CandidateGenerator (optional — absent before candidates.py lands) ─────────
+_CAND_AVAILABLE = False
+try:
+    from gen2.candidates import CandidateGenerator, _fallback_space
+    _CAND_AVAILABLE = True
+except Exception:
+    CandidateGenerator = None   # type: ignore[assignment,misc]
+    _fallback_space = None      # type: ignore[assignment]
+
 # ── path setup ────────────────────────────────────────────────────────────────
 _THIS_DIR = Path(__file__).resolve().parent
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
+_OPT_DIR  = Path(__file__).resolve().parents[1]
+if str(_OPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_OPT_DIR))
 
 # Force UTF-8 output
 try:
@@ -75,14 +85,14 @@ _FUNNEL_AVAILABLE = False
 _FUNNEL_IMPORT_ERROR: str = ""
 
 try:
-    from funnel import FunnelEnv, load_table  # type: ignore[import]
+    from gen2.funnel import FunnelEnv, load_table  # type: ignore[import]
     _FUNNEL_AVAILABLE = True
 except Exception as _e:
     _FUNNEL_IMPORT_ERROR = str(_e)
 
 # ── promotion agent imports ────────────────────────────────────────────────────
 
-from agents.promotion_agent import (  # noqa: E402
+from gen2.promotion_agent import (  # noqa: E402
     FixedGateAgent,
     PromotionAgent,
     RandomPromotionAgent,
@@ -181,7 +191,7 @@ def _make_synthetic_table(n: int = 200, seed: int = 42) -> dict:
     # Dedup
     all_configs = list(dict.fromkeys(all_configs))[:n]
 
-    from constants import AVG_CYCLES, SW_BASELINE_CYCLES, behavioral_cycles
+    from common.constants import AVG_CYCLES, SW_BASELINE_CYCLES, behavioral_cycles
     table: dict[str, dict[str, dict]] = {}
     for (lanes, acc_w, clk, recipe) in all_configs:
         true_r = _true_reward(lanes, acc_w, clk, recipe)
@@ -460,6 +470,7 @@ def _run_campaign(
     target_pct: float = 0.95,
     table_optimum: float = 4.5,
     funnel_env: Any = None,
+    candidates: str = "shuffled",
 ) -> dict:
     """Run one search campaign (one seed) using FunnelEnv table mode and return metrics.
 
@@ -500,6 +511,25 @@ def _run_campaign(
     configs = list(grid_configs)
     rng.shuffle(configs)
 
+    # ── CandidateGenerator (tpe / surrogate_ucb) wiring ──────────────────────
+    # When candidates != "shuffled" and CandidateGenerator is available, we use
+    # it as the config-ordering oracle instead of the pre-shuffled list.
+    # The generator is seeded per-campaign (matches the seed argument) for
+    # reproducibility.  The shuffled list still acts as the universe of valid
+    # configs (configs not in the table are silently skipped by env.reset).
+    _cand_gen: Any = None
+    if candidates != "shuffled" and _CAND_AVAILABLE:
+        # Build fallback space for the generator (matches the tinymac_accel space)
+        _space = _fallback_space()
+        _cand_gen = CandidateGenerator(
+            space=_space,
+            sampler=candidates,       # "tpe" or "surrogate_ucb"
+            surrogate=None,           # no surrogate in benchmark (table-mode only)
+            seed=seed,
+            kappa=1.0,
+            grid_snap=True,           # snap to table grid so lookups hit
+        )
+
     # Create a per-campaign FunnelEnv in table mode with a fresh budget tracker.
     # We use a temporary results path so each campaign's JSONL doesn't accumulate.
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -521,7 +551,36 @@ def _run_campaign(
 
         n_killed = n_committed = n_budget_exhausted = n_configs = 0
 
-        for config in configs:
+        # Config iteration: use CandidateGenerator when available, else shuffled list.
+        # For CandidateGenerator mode we iterate until budget is exhausted or the
+        # generator has proposed all configs in the shuffled universe.
+        def _config_iter():
+            if _cand_gen is not None:
+                # Propose configs from the generator up to len(grid_configs) total;
+                # each call may repeat a config (grid small; generator has seen it
+                # all after ~594 suggests).  We cap at 3× the grid size to prevent
+                # infinite loops when the generator cycles.
+                _seen: set[str] = set()
+                _max_proposals = len(configs) * 3
+                for _ in range(_max_proposals):
+                    try:
+                        cfg = _cand_gen.suggest()
+                    except Exception:
+                        break
+                    # Snap to table-present configs: only yield if in the table
+                    from gen2.funnel import _config_key as _ck
+                    key = _ck(cfg)
+                    if key in table and key not in _seen:
+                        _seen.add(key)
+                        yield cfg
+                    # If not in table, still yield so env.reset can handle it
+                    elif key not in _seen:
+                        _seen.add(key)
+                        yield cfg
+            else:
+                yield from configs
+
+        for config in _config_iter():
             if simulated_s >= budget_s:
                 break
 
@@ -529,6 +588,8 @@ def _run_campaign(
                 state = env.reset(config)
             except (ValueError, KeyError):
                 # Config not in table or invalid; skip
+                if _cand_gen is not None:
+                    _cand_gen.update(config, reward=-100.0, fidelity="invalid")
                 continue
 
             episode_done = False
@@ -568,11 +629,19 @@ def _run_campaign(
             if fid_reached == "F3" and episode_done:
                 final_reward = float(episode_reward)
 
+                # Feed back to CandidateGenerator (F3-only tell rule)
+                if _cand_gen is not None:
+                    _cand_gen.update(config, final_reward, fidelity="F3")
+
                 if final_reward > best_reward:
                     best_reward = final_reward
                     best_curve.append((simulated_s, best_reward))
                     if best_reward >= target_reward and time_to_target_s == budget_s:
                         time_to_target_s = simulated_s
+            else:
+                # Non-F3 result: feed as kill to CandidateGenerator
+                if _cand_gen is not None:
+                    _cand_gen.update(config, episode_reward, fidelity=fid_reached or "F0")
 
         return {
             "best_reward":        best_reward,
@@ -637,6 +706,7 @@ def run_benchmark(
     target_pct: float,
     pretrain_campaigns: int,
     verbose: bool = True,
+    candidates: str = "shuffled",
 ) -> dict[str, dict]:
     """Run the full benchmark.  Returns per-agent metric dict."""
 
@@ -720,7 +790,8 @@ def run_benchmark(
                 for p in range(pretrain_campaigns):
                     _run_campaign(agent, table, grid_configs, budget_s,
                                   seed=seed * 1000 + p, target_pct=target_pct,
-                                  table_optimum=table_optimum)
+                                  table_optimum=table_optimum,
+                                  candidates=candidates)
                 # NOTE: pre-training modifies the agent in-place (it learns from
                 # the throwaway campaigns); this is intended — the bandit IS the
                 # trained policy after warm-up.
@@ -728,6 +799,7 @@ def run_benchmark(
             res = _run_campaign(
                 agent, table, grid_configs, budget_s, seed=seed,
                 target_pct=target_pct, table_optimum=table_optimum,
+                candidates=candidates,
             )
             per_seed_ttt.append(res["time_to_target_s"])
             per_seed_best.append(res["best_reward"])
@@ -937,6 +1009,7 @@ def _run_with_funnel_env(
     budget_s: float,
     target_pct: float,
     pretrain_campaigns: int,
+    candidates: str = "shuffled",
 ) -> None:
     """Run the benchmark using the real FunnelEnv + load_table."""
     if not _FUNNEL_AVAILABLE:
@@ -964,6 +1037,7 @@ def _run_with_funnel_env(
         target_pct=target_pct,
         pretrain_campaigns=pretrain_campaigns,
         verbose=True,
+        candidates=candidates,
     )
 
 
@@ -988,11 +1062,20 @@ def main() -> None:
     parser.add_argument("--selftest", action="store_true",
                         help="Run synthetic-table selftest and exit")
     parser.add_argument("--table",
-                        default=str(_THIS_DIR / "results_funnel.jsonl"),
+                        default=str(_THIS_DIR.parent / "results_funnel.jsonl"),
                         help="Path to results_funnel.jsonl table")
     parser.add_argument("--target-pct", type=float, default=0.95,
                         dest="target_pct",
                         help="Fraction of optimum considered 'found'")
+    parser.add_argument("--candidates", default="shuffled",
+                        choices=["shuffled", "tpe", "surrogate_ucb"],
+                        help=(
+                            "Candidate ordering: shuffled = current seeded-shuffle "
+                            "(default, keeps existing results comparable); "
+                            "tpe = Optuna TPE-backed CandidateGenerator; "
+                            "surrogate_ucb = surrogate UCB (falls back to tpe without surrogate). "
+                            "Non-shuffled modes require gen2/candidates.py."
+                        ))
 
     args = parser.parse_args()
 
@@ -1016,6 +1099,7 @@ def main() -> None:
         budget_s=args.budget,
         target_pct=args.target_pct,
         pretrain_campaigns=args.pretrain_campaigns,
+        candidates=getattr(args, "candidates", "shuffled"),
     )
 
 
