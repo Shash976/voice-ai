@@ -32,15 +32,9 @@ FIRMWARE = _REPO / "firmware" / "picorv32_baremetal" / "firmware.bin"
 
 SIM_TIMEOUT = 120   # seconds
 
-# Stage-3 pure-SW per-inference baseline (no accelerator, 64 test vectors).
-# EMPIRICALLY MEASURED 2026-06-01 by running the sim with hooks commented out:
-#   vec0 cycles = 11,196,638  (11.2 M cycles / inference)
-# The old value of 175,324 was stale — it was from an earlier smaller model.
-# Re-measure whenever the model, test vectors, or firmware changes:
-#   1. Comment out tinyvad_*_hook assignments in firmware/picorv32_baremetal/main.c
-#   2. make -C firmware/picorv32_baremetal && make -C sim/verilator
-#   3. ./sim_picorv32 firmware.bin | sed -n '2p' | cut -d, -f7
-SW_BASELINE_CYCLES = 11_196_638
+# Stage-3 pure-SW per-inference baseline: import from constants.py (single source).
+# Re-measure via measure_real.py whenever the model, test vectors, or firmware changes.
+from constants import SW_BASELINE_CYCLES  # noqa: E402 (after path setup)
 
 
 @lru_cache(maxsize=None)

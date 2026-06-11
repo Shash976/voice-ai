@@ -28,6 +28,7 @@ import os
 
 from physical_runner import run_elaborate, run_physical, run_synth_sta
 from validate import validate
+from constants import behavioral_cycles as _behavioral_cycles, AVG_CYCLES as _AVG_CYCLES
 
 STAGE_ORDER = ["validate", "elaborate", "sim", "proxy", "full"]
 
@@ -38,6 +39,8 @@ def _run_sim(lanes: int, acc_w: int) -> dict:
     """Behavioural Verilator run → {accuracy, correct, n_total, avg_cycles}.
     Under PHYSICAL_MOCK, returns numbers shaped like the real measured sweep:
     acc_width < 24 loses accuracy (int16 ≈ 47/64), matching the empirical finding.
+    Cycle counts come from the constants.py table (or the analytic fit for
+    lane counts not in the table), keeping the mock faithful to the real sim.
     """
     if os.environ.get("PHYSICAL_MOCK"):
         if acc_w >= 24:
@@ -46,7 +49,8 @@ def _run_sim(lanes: int, acc_w: int) -> dict:
             acc = 0.92
         else:                       # int16 — overflow, real measured 47/64
             acc = 47.0 / 64.0
-        cyc = 28_000.0 + 242_000.0 / max(lanes, 1)
+        # Use measured value from table when available; fall back to fit.
+        cyc = float(_AVG_CYCLES[lanes]) if lanes in _AVG_CYCLES else _behavioral_cycles(lanes)
         return {"accuracy": acc, "correct": round(acc * 64), "n_total": 64,
                 "avg_cycles": cyc}
     from runner import run_sim       # imported lazily: needs the Verilator binary

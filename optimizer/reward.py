@@ -54,6 +54,8 @@ from __future__ import annotations
 
 import math
 
+from constants import SW_BASELINE_CYCLES as _SW_BASELINE_CYCLES
+
 # TinyVAD worst-case signed accumulator magnitude
 # Conv0: K=200 (in_ch=40 × kern=5), max |product| = 128×128 = 16384
 # (int8 range is −128..127, but zero-points shift them; 128×128 is conservative)
@@ -67,11 +69,10 @@ _BASELINE_MAC_PRODUCT = 8 * 32       # mac_lanes=8, acc_width=32
 _BASELINE_BUF_BYTES   = 1024 + 1024  # input + weight buffers (fixed; see module docstring)
 
 # SW baseline latency, used to convert real_speedup from cycles → nanoseconds.
-# SW_BASELINE_CYCLES (= 11,196,638, see runner.py) was measured on the Stage-3
-# no-accel sim, which is assumed to run at 10 ns / 100 MHz.  Latency in ns is
-# therefore cycles × 10.0.  Kept here (not imported from runner) so reward.py
-# has no sim dependency and the sanity test can import it standalone.
-SW_BASELINE_CYCLES      = 11_196_638
+# SW_BASELINE_CYCLES is the single source of truth in constants.py (= 11,196,638).
+# Imported above; exposed here as a module-level alias so external callers that
+# import from reward.py directly (e.g. test_reward_sanity.py) continue to work.
+SW_BASELINE_CYCLES      = _SW_BASELINE_CYCLES
 SW_BASELINE_CLOCK_NS    = 10.0                              # 100 MHz
 SW_BASELINE_LATENCY_NS  = SW_BASELINE_CYCLES * SW_BASELINE_CLOCK_NS
 

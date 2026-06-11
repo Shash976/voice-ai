@@ -41,10 +41,18 @@ import reward  # noqa: E402
 from agents.random_agent import RandomAgent  # noqa: E402
 from agents.evo_agent import EvoAgent  # noqa: E402
 from agents.ucb_agent import UCBAgent  # noqa: E402
+from constants import AVG_CYCLES as _AVG_CYCLES_ALL  # noqa: E402
 
 # ── Real measured offline sim model (matches the real sim exactly) ───────────────
-# avg_cycles depends ONLY on mac_lanes; accuracy depends ONLY on accumulator_width.
-AVG_CYCLES = {1: 270307, 2: 149317, 4: 88827, 8: 58577, 16: 43447}
+# avg_cycles: imported from constants.py (single source of truth).
+#   Measured 2026-06-10 after V13 saturation-order fix (per-chunk, matches RTL).
+#   45-config grid uses lanes ∈ {1,2,4,8,16}; we slice that subset here.
+# accuracy depends ONLY on accumulator_width (acc_width does not affect cycles).
+#   acc=16 accuracy is LANES-DEPENDENT after the V13 fix (per-chunk saturation
+#   gives slightly different overflow behaviour); for the offline benchmark we keep
+#   the historical 47/64 = 0.734375 for acc=16 since the benchmark's sanity anchor
+#   still holds (any acc=16 config scores far below acc>=24 regardless).
+AVG_CYCLES = {l: _AVG_CYCLES_ALL[l] for l in [1, 2, 4, 8, 16]}
 ACCURACY = {16: 0.734375, 24: 1.0, 32: 1.0}
 
 # ── Benchmark protocol constants ─────────────────────────────────────────────────
