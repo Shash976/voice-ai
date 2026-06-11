@@ -106,7 +106,7 @@ reward:
   w_area:             -0.4
   w_power:            -0.4
   w_timing_violation: -3.0
-  max_speedup:        576.0
+  max_speedup:       1024.0
   min_useful_speedup:  10.0
   perf_floor_penalty:  -8.0
 
