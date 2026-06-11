@@ -148,15 +148,52 @@ streamlit run optimizer/dashboard.py
 
 **Second-generation funnel optimizer** (see `docs/08_funnel_optimizer.md`) —
 promotion decisions become trainable actions, a surrogate model sits between the
-fidelities, and the space is reduced to the axes that measurably matter
-(lanes × acc_width × clock × ABC recipe; utilization/density fixed):
+fidelities, and the space is either the reduced 4-axis tinymac space or a
+design-agnostic space built from a YAML spec + tiered ORFS knob registry.
+
+> All commands below work via the shims at `optimizer/`; the real code lives
+> under `optimizer/gen2/` and `optimizer/common/`.
 
 ```bash
-python3 optimizer/build_table.py --subset strategic    # offline F0–F2 table, 84 configs ~1.2 h (resumable)
+# Offline F0–F2 table (tinymac, default):
+python3 optimizer/build_table.py --subset strategic    # 84 configs, ~1.2 h (resumable)
+python3 optimizer/build_table.py                       # full 594-config grid, ~7 h
 python3 optimizer/build_table.py --dry-run             # show plan + cost estimate first
-python3 optimizer/fit_surrogate.py                     # fit + cross-validate the surrogate on all built data
-python3 optimizer/benchmark_funnel.py --seeds 20       # random vs fixed-gate vs LinUCB on the table simulator
-PHYSICAL_MOCK=1 python3 optimizer/funnel.py            # FunnelEnv self-test (no tools needed)
+
+# Table for a different design (gcd, tier-2 ORFS knobs active):
+python3 optimizer/build_table.py --design gcd --max-tier 2
+
+# Fit + cross-validate the surrogate on all built data:
+python3 optimizer/fit_surrogate.py                     # writes optimizer/surrogate_n45.joblib
+
+# Benchmark promotion policies on the table simulator:
+python3 optimizer/benchmark_funnel.py --seeds 20       # random vs fixed-gate vs LinUCB
+python3 optimizer/benchmark_funnel.py --candidates tpe         # Optuna TPE candidate ordering
+python3 optimizer/benchmark_funnel.py --candidates surrogate_ucb  # surrogate UCB ordering
+python3 optimizer/benchmark_funnel.py --candidates shuffled    # default (seeded shuffle)
+
+# Live campaign driver — tinymac, 4-axis tier-1 space, TPE candidates:
+python3 optimizer/run_funnel_optimizer.py \
+    --design tinymac_accel --platform nangate45 \
+    --budget-hours 4 --max-tier 1 --sampler tpe --promotion fixed
+
+# Live campaign — gcd, tier-2 knob space:
+python3 optimizer/run_funnel_optimizer.py \
+    --design gcd --platform nangate45 \
+    --budget-hours 4 --max-tier 2 --sampler tpe --promotion fixed
+
+# Table-mode campaign (replay without real ORFS calls):
+python3 optimizer/run_funnel_optimizer.py \
+    --design tinymac_accel --budget-hours 4 \
+    --sampler surrogate_ucb --promotion linucb \
+    --table optimizer/results_funnel.jsonl
+
+# Self-tests (no real tools needed):
+PHYSICAL_MOCK=1 python3 optimizer/funnel.py            # FunnelEnv self-test
+PHYSICAL_MOCK=1 python3 optimizer/run_funnel_optimizer.py \
+    --design tinymac_accel --budget-hours 0.01 \
+    --sampler tpe --promotion fixed \
+    --table optimizer/results_funnel.jsonl
 ```
 
 ---

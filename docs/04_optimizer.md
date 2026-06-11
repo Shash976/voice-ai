@@ -6,6 +6,14 @@
 > surrogate and a trainable promotion policy, plus the repairs that motivated
 > it — is documented in [08_funnel_optimizer.md](08_funnel_optimizer.md).
 
+> **Package note:** the gen-1 code now lives under `optimizer/gen1/` (moved
+> there when gen2 and common packages were added). Thin shims at the
+> `optimizer/` root re-export everything, so **every command in this document
+> works unchanged**. If you need to import directly, use e.g.
+> `from optimizer.gen1.env import OptEnv` instead of `from optimizer.env import
+> OptEnv`. The common plumbing (physical_runner, constants, recipe, validate)
+> moved to `optimizer/common/`; import paths there are also shimmed.
+
 Now that trying a hardware config is cheap (just re-run the behavioral sim with
 different flags), we can *automatically search* for the best accelerator design.
 **Runs on Windows** (pure Python; it shells out to the WSL-built sim, or uses an

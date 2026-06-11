@@ -124,37 +124,52 @@ config-selection PPO would re-learn what a GP prior gets for free).
    correctly and the first 7 nm GDS exists).
 
 Supporting pieces that did not exist when this roadmap was written:
-`optimizer/surrogate.py` (multi-fidelity quantile-GBT, CV Spearman ρ ≈ 0.9 on
-area), `optimizer/recipe.py` (ABC synthesis recipe as a search axis at both proxy
-and full-flow fidelity), `optimizer/constants.py` (measured cycle constants,
-single source of truth), `optimizer/search_space_funnel.yaml` (the evidence-reduced
-594-config space — utilization/density measured at <1.4% effect and frozen).
+`optimizer/gen2/surrogate.py` (multi-fidelity quantile-GBT, CV Spearman ρ ≈ 0.9
+on area), `optimizer/common/recipe.py` (ABC synthesis recipe as a search axis at
+both proxy and full-flow fidelity), `optimizer/common/constants.py` (measured
+cycle constants, single source of truth), `optimizer/gen2/search_space_funnel.yaml`
+(the evidence-reduced 594-config space — utilization/density measured at <1.4%
+effect and frozen), `optimizer/gen2/candidates.py` (Optuna-backed
+`CandidateGenerator`, three samplers, F3-only tell rule — candidate generation
+**is now built**), `optimizer/common/designs.py` + `optimizer/designs/*.yaml`
+(design-agnostic input via `DesignSpec`, proven on gcd), `optimizer/common/knobs.py`
+(24 ORFS variables in 4 tiers, `validate_config()`), `optimizer/gen2/run_funnel_optimizer.py`
+(live campaign driver, `--design`/`--max-tier`/`--sampler`/`--promotion`).
 
 ---
 
 ## Key files
 
-| File | Role |
-|------|------|
-| `optimizer/env.py` | `OptEnv` — the base environment; `step(config)` → `(state, reward, done, info)` |
-| `optimizer/cascade.py` | multi-fidelity funnel (fixed gates); `run_cascade(config)` → stage reached + metrics |
-| `optimizer/cascade_env.py` | `CascadeOptEnv` — wraps the fixed-gate funnel as an env |
-| `optimizer/funnel.py` | `FunnelEnv` — the funnel with promotion *actions*; live or table-replay mode |
-| `optimizer/surrogate.py` | multi-fidelity surrogate: `(config, cheap obs) → (μ, σ)` per metric |
-| `optimizer/recipe.py` | ABC synthesis-recipe axis, shared between proxy and full flow |
-| `optimizer/build_table.py` | resumable offline F0–F2 table builder → `results_funnel.jsonl` |
-| `optimizer/benchmark_funnel.py` | promotion-policy benchmark on the table simulator |
-| `optimizer/constants.py` | measured constants (SW baseline, per-lane cycles, speedup caps) — import, never duplicate |
-| `optimizer/reward.py` | reward computation: `compute_reward()`, `real_speedup()`, `critical_path_ns()` |
-| `optimizer/physical_runner.py` | one config through real ORFS; unit conversion, RTL-hash variant names, timeout discipline |
-| `optimizer/search_space.yaml` | 45-config sim space (3 axes) |
-| `optimizer/search_space_full.yaml` | ~27 K cascade space (6 axes, all wired to real tools) |
-| `optimizer/search_space_funnel.yaml` | 594-config reduced funnel space (lanes × acc_w × clk × recipe) |
-| `optimizer/agents/base_agent.py` | `BaseAgent` interface: `suggest(state, history)` + `update(config, reward, info)` |
-| `optimizer/agents/enumerate_agent.py` | exhaustive grid sweep — the ground truth for comparison |
-| `optimizer/agents/promotion_agent.py` | LinUCB promotion policy + fixed-gate and random baselines |
-| `optimizer/benchmark_agents.py` | offline benchmark (uses a table of real measured results, no live sim) |
-| `optimizer/measure_real.py` | pins SW baseline + per-lane cycle counts from real Verilator sweeps |
+The optimizer is now three packages. Root-level paths below are shims that
+forward to the real module; use the canonical path when importing directly.
+
+| File (canonical) | Shim at `optimizer/` root | Role |
+|------|------|------|
+| `optimizer/gen1/env.py` | — | `OptEnv` — the base environment; `step(config)` → `(state, reward, done, info)` |
+| `optimizer/gen1/cascade.py` | — | multi-fidelity funnel (fixed gates); `run_cascade(config)` → stage reached + metrics |
+| `optimizer/gen1/cascade_env.py` | — | `CascadeOptEnv` — wraps the fixed-gate funnel as an env |
+| `optimizer/gen2/funnel.py` | `optimizer/funnel.py` | `FunnelEnv` — the funnel with promotion *actions*; live or table-replay mode; accepts `design`/`max_tier`/`active_space` |
+| `optimizer/gen2/surrogate.py` | — | multi-fidelity surrogate: `(config, cheap obs) → (μ, σ)` per metric |
+| `optimizer/common/recipe.py` | — | ABC synthesis-recipe axis, shared between proxy and full flow |
+| `optimizer/gen2/candidates.py` | — | `CandidateGenerator` — Optuna TPE/surrogate_ucb/random; F3-only tell rule |
+| `optimizer/gen2/build_table.py` | `optimizer/build_table.py` | resumable offline F0–F2 table builder → `results_funnel.jsonl`; `--design`/`--max-tier` |
+| `optimizer/gen2/benchmark_funnel.py` | `optimizer/benchmark_funnel.py` | promotion-policy benchmark on the table simulator; `--candidates` |
+| `optimizer/gen2/run_funnel_optimizer.py` | `optimizer/run_funnel_optimizer.py` | live campaign driver; `--design`/`--sampler`/`--promotion`/`--max-tier` |
+| `optimizer/gen2/promotion_agent.py` | — | LinUCB promotion policy + fixed-gate and random baselines |
+| `optimizer/common/constants.py` | — | measured constants (SW baseline, per-lane cycles, speedup caps) — import, never duplicate |
+| `optimizer/common/designs.py` | — | `DesignSpec` dataclass + `load(name_or_path)` — design-agnostic input |
+| `optimizer/common/knobs.py` | — | `KnobRegistry` — 24 ORFS variables in 4 tiers; `validate_config()` |
+| `optimizer/gen1/reward.py` | — | reward computation: `compute_reward()`, `real_speedup()`, `critical_path_ns()` |
+| `optimizer/common/physical_runner.py` | — | one config through real ORFS; unit conversion, RTL-hash variant names, timeout discipline |
+| `optimizer/gen1/search_space.yaml` | — | 45-config sim space (3 axes) |
+| `optimizer/gen1/search_space_full.yaml` | — | ~27 K cascade space (6 axes, all wired to real tools) |
+| `optimizer/gen2/search_space_funnel.yaml` | — | 594-config reduced funnel space (lanes × acc_w × clk × recipe) |
+| `optimizer/designs/tinymac_accel.yaml` | — | DesignSpec for TinyMAC (reproduces historical behavior exactly) |
+| `optimizer/designs/gcd.yaml` | — | DesignSpec for gcd (proven on real ORFS full flow) |
+| `optimizer/gen1/agents/base_agent.py` | — | `BaseAgent` interface: `suggest(state, history)` + `update(config, reward, info)` |
+| `optimizer/gen1/agents/enumerate_agent.py` | — | exhaustive grid sweep — the ground truth for comparison |
+| `optimizer/gen1/benchmark_agents.py` | `optimizer/benchmark_agents.py` | offline benchmark (uses a table of real measured results, no live sim) |
+| `optimizer/common/measure_real.py` | `optimizer/measure_real.py` | pins SW baseline + per-lane cycle counts from real Verilator sweeps |
 
 ---
 
@@ -196,8 +211,17 @@ PHYSICAL_MOCK=1 python3 optimizer/funnel.py            # env self-test
 python3 optimizer/benchmark_funnel.py --selftest       # policy benchmark, synthetic table
 python3 optimizer/build_table.py --dry-run             # what a real table build would run
 
-# Understand the reward function interactively (91,650 = measured cycles at 4 lanes):
-python -c "from optimizer.reward import compute_reward, critical_path_ns; \
-           c={'mac_lanes':4,'accumulator_width':24,'clock_period_ns':5}; \
-           print(compute_reward(c, 1.0, 91650))"
+# Gen2 live campaign (PHYSICAL_MOCK=1 for offline test):
+PHYSICAL_MOCK=1 python3 optimizer/run_funnel_optimizer.py \
+    --design tinymac_accel --budget-hours 0.01 \
+    --sampler tpe --promotion fixed \
+    --table optimizer/results_funnel.jsonl
+
+# Understand the reward function interactively:
+python -c "
+import sys; sys.path.insert(0, 'optimizer')
+from common.constants import SW_BASELINE_CYCLES, AVG_CYCLES
+print('SW baseline:', SW_BASELINE_CYCLES, 'cycles/inf')
+print('4-lane avg:', AVG_CYCLES[4], 'cycles/inf')
+"
 ```

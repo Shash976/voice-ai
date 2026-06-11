@@ -53,11 +53,15 @@ bit-exact-verified against the reference inference, then taken all the way to
 configs. See [`docs/06_rtl_to_gds.md`](docs/06_rtl_to_gds.md).
 
 **Stage 5 status:** beyond the original grid search, the optimizer is now a
-**multi-fidelity funnel**: candidate configs climb a ladder of increasingly
-expensive evaluations (analytic → behavioral sim → synthesis proxy → full
-place-and-route), a learned surrogate predicts final metrics from cheap
-observations, and the promote/kill decisions are actions of a trainable policy —
-the project's first genuinely sequential decision problem. See
+**multi-fidelity funnel** with design-agnostic inputs: any chip design can be
+described in a ~10-line YAML spec (`optimizer/designs/`) and evaluated through
+the same fidelity ladder (analytic → behavioral sim → synthesis proxy → full
+place-and-route), proven on a second real design (gcd). A 24-knob, 4-tier ORFS
+knob registry (`optimizer/common/knobs.py`) extends the search space beyond RTL
+parameters, with `--max-tier N` controlling breadth. Candidate generation uses
+Optuna TPE (or surrogate UCB, or random), feeding back only real F3 rewards so
+the model learns the true objective. The promote/kill decisions are actions of a
+trainable policy — the project's first genuinely sequential decision problem. See
 [`docs/08_funnel_optimizer.md`](docs/08_funnel_optimizer.md).
 
 ---
@@ -588,12 +592,17 @@ sim/verilator/
   sim_main.cpp                        Verilator C++ testbench: RAM, UART, accelerator emulation
 
 optimizer/                            Stage 5: both optimizer generations
-  run_optimizer.py / env.py           45-config grid track (behavioral sim + proxies)
-  run_cascade_optimizer.py            fixed-gate multi-fidelity funnel, ~27K configs
-  funnel.py / surrogate.py / recipe.py  second generation: FunnelEnv, learned surrogate,
-  build_table.py / benchmark_funnel.py  ABC-recipe axis, offline table, policy benchmark
-  agents/                             search strategies + the LinUCB promotion policy
-  constants.py                        single source of truth for measured constants
+  gen1/                               single-step black-box DSE: 45-config sim track,
+                                      fixed-gate cascade funnel, physical track, agents
+  gen2/                               multi-fidelity funnel: FunnelEnv, surrogate,
+                                      promotion policies, Optuna candidates, table builder,
+                                      benchmark, campaign driver
+  common/                             shared plumbing: physical_runner, rewards, recipe,
+                                      constants (single source of truth), designs.py,
+                                      knobs.py (24-knob 4-tier ORFS registry)
+  designs/                            per-design YAML specs (tinymac_accel, gcd)
+  run_*.py / build_table.py / etc.    shims — forward to gen1/ or gen2/; all commands
+                                      work unchanged from the optimizer/ root
 
 physical/orfs/                        Stage 6: OpenROAD-flow-scripts integration
   make/                               per-platform config + run.sh / sweep.sh

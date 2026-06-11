@@ -96,20 +96,168 @@ Two honesty rules are built into the reward:
 - **Failures pay the monotone ladder.** Deeper progress before failing is
   strictly less bad, reflecting information gained.
 
+## Code layout (gen1 / gen2 / common)
+
+The optimizer is now three packages under `optimizer/`. Every documented command works unchanged — thin shims at the `optimizer/` root re-export the real modules.
+
+| Package | What lives there |
+|---|---|
+| `optimizer/gen1/` | Single-step black-box DSE: 45-config sim track, fixed-gate cascade funnel, physical track. `env.py`, `cascade.py`, `cascade_env.py`, `physical_env.py`, `reward.py`, `runner.py`, `dashboard.py`, `agents/` (random/evo/ucb/bayesian/enumerate). |
+| `optimizer/gen2/` | The funnel: `funnel.py`, `surrogate.py`, `promotion_agent.py`, `candidates.py`, `build_table.py`, `benchmark_funnel.py`, `fit_surrogate.py`, `search_space_funnel.yaml`. |
+| `optimizer/common/` | Shared plumbing: `physical_runner.py`, `physical_reward.py`, `cascade_reward.py`, `recipe.py`, `constants.py`, `validate.py`, `measure_real.py`, **`designs.py`**, **`knobs.py`**. |
+| `optimizer/designs/` | Per-design YAML specs: `tinymac_accel.yaml`, `gcd.yaml`. |
+
+Root-level shims (`optimizer/run_funnel_optimizer.py`, `optimizer/build_table.py`, etc.) call `runpy.run_path` into the real module — callers do not need to know about the package split.
+
 ## The modules
 
 | File | What it is |
 |---|---|
-| [`../optimizer/funnel.py`](../optimizer/funnel.py) | `FunnelEnv` — gym-style environment over the fidelity ladder. `reset(config)` runs F0 and returns a 22-dim state; `step(action)` with `kill / re-proxy / promote / commit`; terminal on kill or after F3. Runs **live** (real tools) or in **table mode** (replays logged observations, charging recorded costs against a simulated wall-clock budget — the offline training simulator). Logs every row to `results_funnel.jsonl`. |
-| [`../optimizer/search_space_funnel.yaml`](../optimizer/search_space_funnel.yaml) | The evidence-reduced space: `mac_lanes` {1,2,4,8,16,32} × `accumulator_width` {16,24,32} × `clock_period_ns` continuous [3.0, 8.0] (0.5 ns grid for offline tabling) × `abc_recipe` {orfs_speed, orfs_area, plain} = **594 grid configs**; utilization/density fixed at 40 / 0.60. |
-| [`../optimizer/recipe.py`](../optimizer/recipe.py) | The ABC recipe axis. `orfs_speed`/`orfs_area` map to ORFS's own abc scripts at *both* the F2 proxy and the F3 full flow (previously the proxy synthesized with a recipe the full flow never used). `plain` (bare `abc -liberty`) is proxy-only — ORFS hard-codes its script selection — and F3 records the effective recipe when a plain config is committed. |
-| [`../optimizer/surrogate.py`](../optimizer/surrogate.py) | Per-metric quantile-GBT surrogate: `fit(rows)`, `predict(x, obs) → (μ, σ)` for area/period/power, plus `predict_reward_stats` for the composite reward. Multi-fidelity: F2 observables (proxy area, proxy WNS, FF/cell counts) enter as conditioning features with missing-indicators, so one model serves both "config only" and "config + proxy results" queries. `fit_surrogate.py` mines the existing ORFS report tree and validates by cross-validation. |
-| [`../optimizer/agents/promotion_agent.py`](../optimizer/agents/promotion_agent.py) | The promotion policies: `PromotionAgent` (LinUCB contextual bandit over the 22-dim state — the doc-07 analysis shows a bandit is the right starting point, with PPO as a later upgrade *only if* lookahead measurably beats myopia), `FixedGateAgent` (the first-generation hard gates expressed as a policy — the baseline to beat), `RandomPromotionAgent`. |
-| [`../optimizer/build_table.py`](../optimizer/build_table.py) | Resumable offline table builder over the reduced space at F0–F2. Dedupes what physics allows (cycles depend only on lanes → one sim per lane count; the proxy is keyed by lanes/acc_w/clk/recipe). `--subset strategic` = 84-config corner+axis sweep (~1.2 h); the full 594-config table is ~7 h. |
-| [`../optimizer/benchmark_funnel.py`](../optimizer/benchmark_funnel.py) | The benchmark that adjudicates whether learned promotion beats fixed gates: random vs fixed-gate vs LinUCB driving the *real* `FunnelEnv` in table mode, ≥20 seeds, metric = simulated wall-clock to 95% of the table optimum (median and p95). |
-| [`../optimizer/constants.py`](../optimizer/constants.py) | Single source of truth for measured constants — SW baseline (11,196,638 cycles/inference), the per-lane cycle table, the `behavioral_cycles(lanes)` fit, speedup normalization caps. Everything that previously duplicated these numbers imports them from here. |
+| [`../optimizer/gen2/funnel.py`](../optimizer/gen2/funnel.py) | `FunnelEnv` — gym-style environment over the fidelity ladder. `reset(config)` runs F0 and returns a 22-dim state; `step(action)` with `kill / re-proxy / promote / commit`; terminal on kill or after F3. Accepts `design`, `max_tier`, and `active_space` params so it is design-agnostic. For designs without a `tinyvad_sim` functional-eval hook, the F1 stage is skipped (depth goes F0→F2; the two F1 state slots stay zero). Runs **live** (real tools) or in **table mode** (replays logged observations, charging recorded costs against a simulated wall-clock budget). Logs every row to `results_funnel.jsonl`. |
+| [`../optimizer/gen2/search_space_funnel.yaml`](../optimizer/gen2/search_space_funnel.yaml) | The evidence-reduced tinymac space: `mac_lanes` {1,2,4,8,16,32} × `accumulator_width` {16,24,32} × `clock_period_ns` continuous [3.0, 8.0] (0.5 ns grid for offline tabling) × `abc_recipe` {orfs_speed, orfs_area, plain} = **594 grid configs**; utilization/density fixed at 40 / 0.60. (For other designs the space is built dynamically from the YAML spec + KnobRegistry.) |
+| [`../optimizer/common/recipe.py`](../optimizer/common/recipe.py) | The ABC recipe axis. `orfs_speed`/`orfs_area` map to ORFS's own abc scripts at *both* the F2 proxy and the F3 full flow (previously the proxy synthesized with a recipe the full flow never used). `plain` (bare `abc -liberty`) is proxy-only — ORFS hard-codes its script selection — and F3 records the effective recipe when a plain config is committed. |
+| [`../optimizer/gen2/surrogate.py`](../optimizer/gen2/surrogate.py) | Per-metric quantile-GBT surrogate: `fit(rows)`, `predict(x, obs) → (μ, σ)` for area/period/power, plus `predict_reward_stats` for the composite reward. Multi-fidelity: F2 observables (proxy area, proxy WNS, FF/cell counts) enter as conditioning features with missing-indicators, so one model serves both "config only" and "config + proxy results" queries. `fit_surrogate.py` mines the existing ORFS report tree and validates by cross-validation. |
+| [`../optimizer/gen2/promotion_agent.py`](../optimizer/gen2/promotion_agent.py) | The promotion policies: `PromotionAgent` (LinUCB contextual bandit over the 22-dim state — the doc-07 analysis shows a bandit is the right starting point, with PPO as a later upgrade *only if* lookahead measurably beats myopia), `FixedGateAgent` (the first-generation hard gates expressed as a policy — the baseline to beat), `RandomPromotionAgent`. |
+| [`../optimizer/gen2/candidates.py`](../optimizer/gen2/candidates.py) | `CandidateGenerator` — Optuna-backed next-config proposer (see "Candidate generation" section below). |
+| [`../optimizer/gen2/build_table.py`](../optimizer/gen2/build_table.py) | Resumable offline table builder over the reduced space at F0–F2. Dedupes what physics allows (cycles depend only on lanes → one sim per lane count; the proxy is keyed by lanes/acc_w/clk/recipe). `--subset strategic` = 84-config corner+axis sweep (~1.2 h); the full 594-config table is ~7 h. Accepts `--design` and `--max-tier` for non-tinymac designs. |
+| [`../optimizer/gen2/benchmark_funnel.py`](../optimizer/gen2/benchmark_funnel.py) | The benchmark that adjudicates whether learned promotion beats fixed gates: random vs fixed-gate vs LinUCB driving the *real* `FunnelEnv` in table mode, ≥20 seeds, metric = simulated wall-clock to 95% of the table optimum (median and p95). Accepts `--candidates shuffled|tpe|surrogate_ucb`. |
+| [`../optimizer/gen2/run_funnel_optimizer.py`](../optimizer/gen2/run_funnel_optimizer.py) | Live campaign driver — see "How to run" below. Shim at `optimizer/run_funnel_optimizer.py`. |
+| [`../optimizer/common/constants.py`](../optimizer/common/constants.py) | Single source of truth for measured constants — SW baseline (11,196,638 cycles/inference), the per-lane cycle table, the `behavioral_cycles(lanes)` fit, speedup normalization caps. Everything that previously duplicated these numbers imports them from here. |
+| [`../optimizer/common/designs.py`](../optimizer/common/designs.py) | `DesignSpec` dataclass + `DesignSpec.load(name_or_path)` — see "Bring your own design" below. |
+| [`../optimizer/common/knobs.py`](../optimizer/common/knobs.py) | `KnobRegistry` with 24 ORFS variables in 4 tiers — see "The knob tiers" below. |
 
-### The 22-dim promotion-policy state
+---
+
+## Bring your own design
+
+`DesignSpec` (`optimizer/common/designs.py`) decouples the optimizer from
+tinymac. A design = an RTL file list, a top module name, a clock port, optional
+RTL chparam axes, and per-platform clock ranges. Everything else (knob space,
+candidate generation, FunnelEnv, physical_runner) derives from the spec at
+runtime.
+
+A new design takes roughly 10 lines of YAML in `optimizer/designs/<name>.yaml`:
+
+```yaml
+name: my_design
+top:  my_top_module
+rtl_files:
+  - rtl/my_design/my_top.v        # relative to repo root or absolute
+clock_port: clk
+params: {}                         # RTL chparam axes; omit or {} if none
+platforms:
+  nangate45:
+    clock_range_ns: [3.0, 10.0]
+    default_clock_ns: 5.0
+has_macros: false                  # or true, or omit for auto-detect at F2
+functional_eval:
+  kind: none                       # use tinyvad_sim for the TinyVAD evaluator
+```
+
+`DesignSpec.load("my_design")` resolves the YAML from `optimizer/designs/`,
+resolves RTL paths (relative to repo root), computes an 8-hex RTL content hash
+for variant-name invalidation, and generates SDC text with the correct platform
+time unit.
+
+**`tinymac_accel.yaml`** reproduces historical behavior exactly: canonical
+search-axis names (`mac_lanes`, `accumulator_width`) with `rtl_param_name`
+fields (`LANES`, `ACC_W`) for VERILOG_TOP_PARAMS emission; same RTL hash as the
+legacy hard-coded path; `functional_eval.kind = tinyvad_sim` to enable F1.
+
+**`gcd.yaml`** wraps ORFS's shipped gcd design and was run through the real
+full flow as proof of generality:
+
+| Clock (ns) | Area (µm²) | WNS (ns) | Fmax (MHz) | Timing |
+|---|---|---|---|---|
+| 0.8 | 684 | — | — | met |
+| 0.6 | 892 | — | 1465 | 26 violations |
+
+gcd has no RTL params (`params: {}`) and no functional eval hook, so F1 is
+skipped automatically (F0→F2 only; the two F1 state slots in the 22-dim vector
+remain zero).
+
+---
+
+## The knob tiers
+
+`KnobRegistry` (`optimizer/common/knobs.py`) holds 24 ORFS variables in four
+importance tiers, each with a verified emit line, range, and evidence note.
+`--max-tier N` caps the search to tiers ≤ N everywhere (build_table,
+run_funnel_optimizer). Tier-4 knobs are suppressed automatically when
+`design.has_macros` is False.
+
+| Tier | Count | Knobs | Tier label |
+|------|-------|-------|------------|
+| 1 | 4 | `VERILOG_TOP_PARAMS` (RTL chparams), `CLOCK_PERIOD`, `ABC_AREA` (synthesis recipe), `CORE_UTILIZATION` | Dominant |
+| 2 | 6 | `CORE_ASPECT_RATIO`, `CORE_MARGIN`, `PLACE_DENSITY`, `PLACE_DENSITY_LB_ADDON`, `CELL_PAD_IN_SITES_GLOBAL_PLACEMENT`, `CELL_PAD_IN_SITES_DETAIL_PLACEMENT` | Floorplan/placement |
+| 3 | 9 | `CTS_CLUSTER_SIZE`, `CTS_CLUSTER_DIAMETER`, `TNS_END_PERCENT`, `SETUP_SLACK_MARGIN`, `ROUTING_LAYER_ADJUSTMENT`, `RECOVER_POWER`, `DETAILED_ROUTE_END_ITERATION`, `MIN_PLACE_STEP_COEF`, `MAX_PLACE_STEP_COEF` | CTS/route fine-tuning |
+| 4 | 5 | `MACRO_PLACE_HALO`, `MACRO_BLOCKAGE_HALO`, `RTLMP_MAX_LEVEL`, `RTLMP_WIRELENGTH_WT`, `RTLMP_BOUNDARY_WT` | Macro-only (suppressed when `has_macros=False`) |
+
+Evidence notes for tier-1 selection: `LANES` dominates (area ×2.6 L1→L32,
+cycles ×5.8); `CLOCK_PERIOD` is the strongest flow-level coupling on 46 real
+builds (Fmax 113→307 MHz, area ±18%); `ABC_AREA` (i.e. abc_recipe) produced
+43% synthesis-area spread across 3 recipes at fixed geometry; `CORE_UTILIZATION`
+is AutoTuner's canonical #1 lever for general designs (measured <0.3% on
+tinymac — a very sparse design — but dominant for denser designs like gcd).
+
+`validate_config()` blocks known flow-crashing combinations:
+`CORE_UTILIZATION > 60` with `CELL_PAD > 2` triggers a placer abort; `PLACE_DENSITY > 0.80` aborts the placer; `MIN_PLACE_STEP_COEF > MAX_PLACE_STEP_COEF` crashes. These are checked before any tool is invoked.
+
+When ORFS knobs beyond tier 1 are active, variant names gain a knob-hash suffix
+(`L4_A24_c5_r3fa2b1c9_k7f2e`) so configurations differing only in ORFS knobs
+never alias in the cache.
+
+---
+
+## Designs with macros
+
+The gen2 funnel works with macro-containing designs without any architectural
+change. When `design.has_macros` is True (or auto-detected as True at first F2
+synthesis), tier-4 knobs (`MACRO_PLACE_HALO`, `MACRO_BLOCKAGE_HALO`,
+`RTLMP_MAX_LEVEL`, `RTLMP_WIRELENGTH_WT`, `RTLMP_BOUNDARY_WT`) become active
+and enter the search space; otherwise they are suppressed.
+
+The adopted macro-placement strategy is OpenROAD's own hierarchical macro
+placer (RTL-MP), steered through the tier-4 knobs. At the 2–4 macro counts
+this project will see (SRAM weight/activation buffers), learned
+placement (AlphaChip-style) was evaluated and rejected as over-engineering:
+it requires thousands of macro-placement examples to train, provides no
+improvement over RTL-MP + simple knob tuning for small macro counts, and adds
+a heavyweight dependency. The funnel architecture is unchanged — macros just
+activate one more knob group and trigger the `MACRO_PLACEMENT_TCL` path in ORFS.
+
+---
+
+## Candidate generation (Optuna)
+
+`CandidateGenerator` (`optimizer/gen2/candidates.py`) sits above the FunnelEnv
+and proposes which config to evaluate next. It wraps an Optuna study and
+optionally consults the fitted surrogate for UCB acquisition.
+
+Three sampler modes:
+
+| Sampler | What it does |
+|---|---|
+| `"tpe"` | Optuna TPESampler (Tree-structured Parzen Estimator) via ask/tell API. Default. Handles mixed discrete/continuous/categorical spaces with cold-start warmup (10 random trials before switching to TPE). |
+| `"surrogate_ucb"` | Ranks candidates by `μ + κ·σ` from `surrogate.predict_reward_stats(x)`. Pool = full grid enumeration (when all axes are finite) or 512 random draws + one TPE ask. Re-ranked on every `update()`. Falls back to TPE without a surrogate. |
+| `"random"` | Seeded uniform sampling. The offline baseline. |
+
+**Honesty rule (F3-only tell):** only terminal F3 rewards are fed to the Optuna
+study via `study.tell()`. Killed configs and proxy-only results go to a
+skip-memo so they are avoided on subsequent `suggest()` calls, but they are
+marked FAIL in the study rather than carrying a proxy reward value. This
+ensures TPE learns the true F3 objective, not a cheaper proxy signal.
+
+`grid_snap=True` snaps continuous axes (clock_period_ns) to 0.5 ns increments
+so table-mode FunnelEnv lookups hit stored rows. `warm_start(history)` injects
+historical F3 records into the study before a campaign (for transfer from a
+previous run).
+
+---
+
+## How to run
+
+### 22-dim promotion-policy state
 
 `[config encoding (5) | F0 cycles+accuracy (2) | F1 cycles+accuracy (2) |
 F2 proxy area, WNS, FFs, cells, logic levels (5) | surrogate μ,σ (2) |
@@ -133,13 +281,14 @@ The 45-config grid optimum is unchanged: `{lanes:4, acc:24, clk:5}` (reward 3.99
 
 ---
 
-## How to run
-
 ```bash
 # Build the offline table (resumable; rows append to optimizer/results_funnel.jsonl)
 python3 optimizer/build_table.py --subset strategic        # 84 configs, ~1.2 h
 python3 optimizer/build_table.py                           # full 594-config grid, ~7 h
 python3 optimizer/build_table.py --dry-run                 # show the plan + cost estimate
+
+# Table for a different design (gcd, tier-2 knob space):
+python3 optimizer/build_table.py --design gcd --max-tier 2
 
 # Fit / validate the surrogate on everything built so far
 python3 optimizer/fit_surrogate.py                         # prints per-metric CV correlation
@@ -148,11 +297,35 @@ python3 optimizer/fit_surrogate.py                         # prints per-metric C
 # Benchmark promotion policies on the table simulator
 python3 optimizer/benchmark_funnel.py --seeds 20
 python3 optimizer/benchmark_funnel.py --selftest           # synthetic table, fast
+python3 optimizer/benchmark_funnel.py --candidates tpe     # use Optuna TPE candidate ordering
+python3 optimizer/benchmark_funnel.py --candidates surrogate_ucb   # surrogate UCB ordering
+
+# Live campaign (tinymac, default 4-axis tier-1 space):
+python3 optimizer/run_funnel_optimizer.py \
+    --design tinymac_accel --platform nangate45 \
+    --budget-hours 4 --max-tier 1 --sampler tpe --promotion fixed
+
+# Live campaign (gcd, tier-2 knob space, Optuna TPE):
+python3 optimizer/run_funnel_optimizer.py \
+    --design gcd --platform nangate45 \
+    --budget-hours 4 --max-tier 2 --sampler tpe --promotion fixed
+
+# Table-mode campaign (replay logged observations, no real ORFS):
+python3 optimizer/run_funnel_optimizer.py \
+    --design tinymac_accel --platform nangate45 \
+    --budget-hours 4 --sampler surrogate_ucb --promotion linucb \
+    --table optimizer/results_funnel.jsonl
 
 # Self-tests (no real tools needed)
 PHYSICAL_MOCK=1 python3 optimizer/funnel.py                # FunnelEnv self-test
 PHYSICAL_MOCK=1 python3 optimizer/build_table.py --subset strategic --limit 5
+PHYSICAL_MOCK=1 python3 optimizer/run_funnel_optimizer.py \
+    --design tinymac_accel --budget-hours 0.01 --sampler tpe --promotion fixed \
+    --table optimizer/results_funnel.jsonl
 ```
+
+All `optimizer/run_funnel_optimizer.py` commands also work via the gen2 path:
+`python3 optimizer/gen2/run_funnel_optimizer.py`.
 
 Live mode is just `FunnelEnv(table=None)` — same env, real tools. Sustainable
 F3 throughput on the VM is ~8 serial full flows/hour (~14/h with 2 concurrent).
@@ -196,3 +369,9 @@ F3 throughput on the VM is ~8 serial full flows/hour (~14/h with 2 concurrent).
    correctly (old variants become unreachable instead of stale).
 5. **PPO upgrade of the promotion policy** — only if table-simulation shows the
    bandit's myopia measurably loses to lookahead.
+
+Items now closed (were listed as gaps in earlier versions of this doc):
+- **Optuna candidate generation** — built and validated (`gen2/candidates.py`,
+  three samplers: tpe/surrogate_ucb/random, F3-only tell rule). See section above.
+- **Design-agnostic input** — built (`common/designs.py`, `optimizer/designs/`
+  YAML registry, proven on gcd as a second real design).
