@@ -45,11 +45,20 @@ Stage 6    RTL synthesis → place-and-route → GDS (real chip)      🚧 GDS p
 ```
 
 **Stage 6 status:** synthesizable accelerator RTL (`rtl/accel/`) written and
-bit-exact-verified against the reference inference, then taken all the way to a
-**nangate45 GDS layout** via OpenROAD-flow-scripts. First real numbers (LANES=4,
-ACC_W=24): ~19,738 µm² die area, ~269 MHz Fmax (requantize-multiply-limited),
-231 flip-flops. A parameter sweep (`physical/orfs/make/sweep.sh`) compares
-LANES configs. See [`docs/06_rtl_to_gds.md`](docs/06_rtl_to_gds.md).
+bit-exact-verified against the reference inference, then taken all the way to
+**GDS layouts on two process nodes** via OpenROAD-flow-scripts. nangate45
+(LANES=4, ACC_W=24): ~19,738 µm² die area, ~269 MHz Fmax
+(requantize-multiply-limited), 230 flip-flops. asap7 (7 nm-class): 1433 µm²,
+509 MHz. A parameter sweep (`physical/orfs/make/sweep.sh`) compares LANES
+configs. See [`docs/06_rtl_to_gds.md`](docs/06_rtl_to_gds.md).
+
+**Stage 5 status:** beyond the original grid search, the optimizer is now a
+**multi-fidelity funnel**: candidate configs climb a ladder of increasingly
+expensive evaluations (analytic → behavioral sim → synthesis proxy → full
+place-and-route), a learned surrogate predicts final metrics from cheap
+observations, and the promote/kill decisions are actions of a trainable policy —
+the project's first genuinely sequential decision problem. See
+[`docs/08_funnel_optimizer.md`](docs/08_funnel_optimizer.md).
 
 ---
 
@@ -128,12 +137,17 @@ make host          # compiles the C inference engine for x86
 
 **Expected output:**
 ```
-Running 42 test vectors...
-42/42 passed
-Max logit error vs TFLite: 2 LSB
+Logit match: 64/64 passed (0 failed)
+Label match: 64/64 correct
+PASS — C inference matches TFLite golden vectors.
 ```
 
-"2 LSB" means the int8 C engine's output differs from the TFLite float reference by at most 2 counts — normal quantization rounding noise. This confirms the C inference engine is correct before it gets compiled for the RISC-V chip.
+The tolerance is ±3 LSB: the int8 C engine's output may differ from the TFLite
+reference by at most 3 counts. This is accumulation-order rounding noise (the C
+engine iterates the layers in a different loop order than TFLite's kernels; the
+worst case across all 64 vectors is one vector at 3 LSB, labels unaffected). This
+confirms the C inference engine is correct before it gets compiled for the
+RISC-V chip.
 
 ---
 
@@ -363,7 +377,14 @@ From then on, every Conv and FC layer call goes through the accelerator instead 
 
 Right now, the accelerator is **not RTL** — it is a C++ function inside `sim_main.cpp`. When the testbench sees a write to `0x20000000–0x20000FFF`, it calls `accel_write()` which runs the C++ MAC logic directly. This is the "behavioral model."
 
-Simulated latency: `ceil(total_MACs / MAC_LANES)` cycles, where `MAC_LANES = 8` (configurable at line 43 of `sim_main.cpp`). The testbench sets `accel_done_at = current_cycle + latency` and reports STATUS=busy until then. This models what real pipelined hardware would do without needing actual RTL.
+Simulated latency: `n_outputs × (ceil(K / MAC_LANES) + 2)` cycles — the `+2` is the
+real per-output-channel overhead (bias load + requantize) measured from the Stage-6
+RTL, backported here so the behavioral model doesn't overstate the hardware. The
+accumulator also saturates per `LANES`-wide chunk, exactly like the RTL's adder
+tree. `MAC_LANES` defaults to 8 and is settable at runtime (`--mac-lanes`). The
+testbench sets `accel_done_at = current_cycle + latency` and reports STATUS=busy
+until then. This models what real pipelined hardware would do without needing
+actual RTL.
 
 ### How to run (WSL)
 
@@ -384,12 +405,12 @@ make run
 **stdout** — same format as Stage 3, same 64/64 correct, drastically fewer cycles:
 ```
 vec,label,result,correct,logit0,logit1,cycles
-0,1,1,1,-42,18,58577
-1,0,0,1,23,-9,58572
+0,1,1,1,-42,18,61399
+1,0,0,1,23,-9,61394
 ...
-63,1,1,1,-38,21,58581
+63,1,1,1,-38,21,61403
 ---
-correct=64/64 avg_cycles=58577
+correct=64/64 avg_cycles=61399
 ```
 
 **stderr** — shows the accelerator being invoked for each layer of each inference:
@@ -401,7 +422,7 @@ correct=64/64 avg_cycles=58577
 [accel] cmd=1 M=32 K=64 in=0x... wt=0x... bias=0x... out=0x...        ← FC0
 [accel] cmd=1 M=2  K=32 in=0x... wt=0x... bias=0x... out=0x...        ← FC1
 ...  (repeats for all 64 vectors)
-[sim] Done in 3854228 cycles (wall: ~38.5 ms at 100 MHz) mac_lanes=8 acc_width=32
+[sim] Done in ~4.0M cycles (wall: ~40 ms at 100 MHz) mac_lanes=8 acc_width=32
 ```
 
 ### Results
@@ -411,25 +432,32 @@ All cycle figures are **per inference**. Speedup is vs. the Stage-3 SW baseline
 
 | | Stage 3 — software only | Stage 4 — accel, 8 lanes | Stage 4 — accel, 16 lanes |
 |---|---|---|---|
-| Cycles / inference | ~11.2 M | ~58.6 K | ~43.4 K |
-| Time at 100 MHz | ~112 ms | ~0.59 ms | ~0.43 ms |
+| Cycles / inference | ~11.2 M | ~61.4 K | ~46.7 K |
+| Time at 100 MHz | ~112 ms | ~0.61 ms | ~0.47 ms |
 | Accuracy | 64/64 | 64/64 | 64/64 |
-| **Speedup** | 1× | **~191×** | **~258×** |
+| **Speedup** | 1× | **~182×** | **~240×** |
 
 At `acc_width=32` the accelerator's output is bitwise identical to the software
 path — its C++ requantization matches the firmware's exactly. (At `acc_width=16`
 the accelerator deliberately reproduces hardware-accurate overflow, dropping to
-47/64 — see Stage 5.)
+47–58/64 depending on lane count — see Stage 5.)
 
 ---
 
 ## Stage 5 (✅ complete): Design-Space Optimization
 
-> **Built — see [docs/04_optimizer.md](docs/04_optimizer.md) for the as-implemented
-> details.** It is design-space *exploration* (single-step black-box search), not RL.
-> The 45-config sim grid is fully enumerable (`--agent enumerate` gives the true
-> optimum `{lanes:4, acc:24, clk:5}`); the learning strategies are for the larger
-> cascade space. The original plan below is kept for context.
+> **Built — two generations.** The first generation
+> ([docs/04_optimizer.md](docs/04_optimizer.md)) is design-space *exploration*
+> (single-step black-box search), not RL: the 45-config sim grid is fully
+> enumerable (`--agent enumerate` gives the true optimum `{lanes:4, acc:24,
+> clk:5}`), and the honest benchmark finding is that no learning agent beats
+> random there. The second generation
+> ([docs/08_funnel_optimizer.md](docs/08_funnel_optimizer.md)) restructures the
+> search as a multi-fidelity funnel — cheap analytic checks, then behavioral
+> simulation, then a synthesis proxy, then full place-and-route — with a learned
+> surrogate model and trainable promote/kill decisions, evaluated against real
+> OpenROAD builds on nangate45 and asap7. The original plan below is kept for
+> context.
 
 The behavioral model makes it cheap to try different hardware configurations. `MAC_LANES` is the most obvious knob: 1 lane = sequential, 16 lanes = 16 MACs per cycle. But there are others: accumulator width (int16 vs int32), dataflow strategy (weight-stationary vs output-stationary), buffer sizes.
 
@@ -553,9 +581,25 @@ firmware/
 rtl/
   picorv32/                           PicoRV32 CPU core (upstream, unmodified Verilog)
   soc/picorv32_soc.v                  thin wrapper exposing CPU memory bus to testbench
+  accel/                              Stage 6: synthesizable TinyMAC accelerator RTL
+  tb/                                 RTL unit testbench (bit-exact vs software golden)
 
 sim/verilator/
   sim_main.cpp                        Verilator C++ testbench: RAM, UART, accelerator emulation
+
+optimizer/                            Stage 5: both optimizer generations
+  run_optimizer.py / env.py           45-config grid track (behavioral sim + proxies)
+  run_cascade_optimizer.py            fixed-gate multi-fidelity funnel, ~27K configs
+  funnel.py / surrogate.py / recipe.py  second generation: FunnelEnv, learned surrogate,
+  build_table.py / benchmark_funnel.py  ABC-recipe axis, offline table, policy benchmark
+  agents/                             search strategies + the LinUCB promotion policy
+  constants.py                        single source of truth for measured constants
+
+physical/orfs/                        Stage 6: OpenROAD-flow-scripts integration
+  make/                               per-platform config + run.sh / sweep.sh
+  synth_area.sh                       yosys-only area sweep (no OpenROAD needed)
+
+docs/                                 numbered onboarding + reference docs (start at 00)
 
 speech_commands/                      Google Speech Commands v2 training data
 ```
