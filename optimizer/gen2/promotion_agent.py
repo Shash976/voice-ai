@@ -356,10 +356,15 @@ class FixedGateAgent:
             return "promote"
 
         if depth_f0 > 0.5:
-            # After analytic F0: gate on accuracy flag
+            # After analytic F0: gate on accuracy flag.
+            # F0 accuracy is 0.0 for generic designs (no functional eval).
+            # Treat exactly 0.0 as the "no-data sentinel" and promote rather than
+            # kill — killing on sentinel value would wedge all generic (non-tinyvad)
+            # designs at F0 regardless of their actual merit.
+            # Only kill when accuracy is in the range (0.0, accuracy_kill_threshold):
+            # i.e. a real measured sub-threshold accuracy, not the no-data sentinel.
             f0_acc = _get(IDX_F0_ACC, default=1.0)
-            # F0 accuracy flag: 1.0 if acc_w >= 24, 0.0 if narrower
-            if f0_acc < self.accuracy_kill_threshold:
+            if f0_acc > 0.0 and f0_acc < self.accuracy_kill_threshold:
                 return "kill"
             return "promote"
 
