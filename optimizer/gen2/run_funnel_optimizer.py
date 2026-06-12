@@ -330,6 +330,7 @@ def run_campaign(
 
             try:
                 next_state, reward, episode_done, info = env.step(action)
+                print(f"    └── [STEP] Gate: {fidelity_reached} -> Action Chosen: {action.upper()} -> Step Reward: {reward:+.3f}")
             except Exception as exc:   # noqa: BLE001
                 print(f"  [WARN] env.step({action!r}) failed: {exc}")
                 episode_done = True
@@ -398,12 +399,15 @@ def run_campaign(
             pass
 
         if verbose:
-            cfg_str = (
-                f"L{config.get('mac_lanes','?')} "
-                f"A{config.get('accumulator_width','?')} "
-                f"c{config.get('clock_period_ns','?')} "
-                f"{config.get('abc_recipe','?')}"
-            )
+            cfg_items = []
+            for axis_name in space.keys():
+                val = config.get(axis_name, '?')
+                # If it's a float, format it cleanly so it doesn't clutter the screen
+                if isinstance(val, float):
+                    cfg_items.append(f"{axis_name}={val:.3f}")
+                else:
+                    cfg_items.append(f"{axis_name}={val}")
+            cfg_str = " | ".join(cfg_items)
             r_str = f"{episode_reward_acc:+.3f}" if f3_reward is None else f"{f3_reward:+.3f}(F3)"
             best_str = f"{best_reward:+.3f}" if best_reward != float("-inf") else "     —"
             print(f"  {n_episodes:>8d} {fidelity_reached:>8} {r_str:>9} "
