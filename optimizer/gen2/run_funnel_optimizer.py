@@ -8,7 +8,7 @@ Gen2 counterpart of gen1/run_physical_optimizer.py.  Drives a loop of:
   4. CandidateGenerator.update(config, terminal_reward, fidelity)
   5. PromotionAgent.update per step (online LinUCB update)
 
-Logs one JSONL line per episode to optimizer/results_funnel_campaigns.jsonl.
+Logs one JSONL line per episode to optimizer/campaigns/<design>/<platform>/results_funnel_campaigns.jsonl.
 Prints a running incumbent line and a summary on exit.
 
 CLI
@@ -80,8 +80,9 @@ except Exception as _e:
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
-_RESULTS_PATH = Path(__file__).resolve().parents[1] / "results_funnel_campaigns.jsonl"
-_DEFAULT_SURROGATE = Path(__file__).resolve().parents[1] / "surrogate_n45.joblib"
+_OPT_ROOT = Path(__file__).resolve().parents[1]
+_CAMPAIGNS_ROOT = _OPT_ROOT / "campaigns"
+_DEFAULT_SURROGATE = _OPT_ROOT / "surrogate_n45.joblib"
 _DEFAULT_SPACE_YAML = Path(__file__).resolve().parent / "search_space_funnel.yaml"
 
 # Fidelity labels in promotion order
@@ -217,6 +218,7 @@ def run_campaign(
 
     t0 = time.time()
     results_path = Path(results_path)
+    results_path.parent.mkdir(parents=True, exist_ok=True)
     campaign_id = f"campaign_{seed}_{int(t0)}"
 
     # ── load surrogate ─────────────────────────────────────────────────────────
@@ -477,8 +479,9 @@ def main() -> None:
                    help="Path to results_funnel.jsonl (table mode); omit for live mode")
     p.add_argument("--surrogate", default=None, dest="surrogate",
                    help="Path to surrogate .joblib (default: auto-detect surrogate_n45.joblib)")
-    p.add_argument("--out", default=str(_RESULTS_PATH), dest="out",
-                   help="JSONL output path for campaign logs")
+    p.add_argument("--out", default=None, dest="out",
+                   help="JSONL output path for campaign summary log "
+                        "(default: campaigns/<design>/<platform>/results_funnel_campaigns.jsonl)")
     p.add_argument("--space-yaml", default=str(_DEFAULT_SPACE_YAML), dest="space_yaml",
                    help="Path to search_space_funnel.yaml")
     p.add_argument("--quiet", action="store_true",
@@ -492,6 +495,12 @@ def main() -> None:
     if not _CAND_OK:
         print(f"ERROR: CandidateGenerator not available: {_CAND_ERR}")
         sys.exit(1)
+
+    if args.out is not None:
+        out_path = Path(args.out)
+    else:
+        design_slug = args.design or "unknown"
+        out_path = _CAMPAIGNS_ROOT / design_slug / args.platform / "results_funnel_campaigns.jsonl"
 
     budget_s = args.budget_hours * 3600.0
     is_mock = os.environ.get("PHYSICAL_MOCK", "").strip() in ("1", "true", "True", "yes")
@@ -508,7 +517,7 @@ def main() -> None:
         seed=args.seed,
         table_path=args.table,
         surrogate_path=args.surrogate,
-        results_path=Path(args.out),
+        results_path=out_path,
         space_yaml=Path(args.space_yaml),
         verbose=not args.quiet,
     )
