@@ -56,6 +56,16 @@ physical/orfs/make/**/constraint_*.sdc
 # Matches results.jsonl, results_physical.jsonl, and any future variants
 optimizer/results*.jsonl
 optimizer/__pycache__/
+# Raw per-campaign JSONL files written directly into optimizer/ root or repo root by the runner.
+# Curated copies live in optimizer/campaigns/<design>/<platform>/ and ARE committed.
+optimizer/funnel_campaign_*.jsonl
+funnel_campaign_*.jsonl
+*_run[0-9]*.jsonl
+# Visualization artifacts (optimizer/viz): generated HTML reports and the
+# JournalStorage files optuna-dashboard reads. Regenerated from the JSONL logs.
+# Scoped to optimizer root only — reports inside campaigns/ are committed as-is.
+optimizer/report_*.html
+*.optuna-journal
 
 # ─── Review / scratch ─────────────────────────────────────────────────────────
 review/

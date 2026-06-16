@@ -1,0 +1,88 @@
+python3 optimizer/run_funnel_optimizer.py --design gcd --platform nangate45 \
+      --budget-hours 4 --max-tier 2 --sampler tpe --promotion fixed
+  Surrogate loaded from /home/shashwat/voiceAI/optimizer/surrogate_n45.joblib (fitted=True, n_rows=44)
+  Space: 7 axes: ['clock_period_ns', 'abc_recipe', 'CORE_ASPECT_RATIO', 'CORE_MARGIN', 'PLACE_DENSITY_LB_ADDON', 'CELL_PAD_IN_SITES_GLOBAL_PLACEMENT', 'CELL_PAD_IN_SITES_DETAIL_PLACEMENT']
+
+  Campaign campaign_0_1781206393
+  sampler=tpe promotion=fixed budget=4.00h seed=0 table=no
+   Episode Fidelity    Reward      Best  Spent(h) Config
+  -------- -------- --------- --------- --------- ----------------------------------------
+         1       F3 +4.965(F3)    +4.965    0.025h  L? A? c1.232982956676452 orfs_speed
+         2       F3 +4.980(F3)    +4.980    0.048h  L? A? c0.9518505820038221 orfs_speed
+         3       F3 +4.845(F3)    +4.980    0.071h  L? A? c1.6228664766147458 orfs_area
+         4       F3 +4.776(F3)    +4.980    0.096h  L? A? c1.9059371589842926 orfs_speed
+         5       F3 +4.928(F3)    +4.980    0.117h  L? A? c1.3405627286281163 orfs_area
+         6       F3 +4.897(F3)    +4.980    0.143h  L? A? c1.440084378350871 plain
+         7       F3 +4.979(F3)    +4.980    0.162h  L? A? c0.6550904853612189 orfs_area
+         8       F3 +1.972(F3)    +4.980    0.199h  L? A? c0.5349110172926435 plain
+         9       F3 +4.764(F3)    +4.980    0.220h  L? A? c1.9604938499235731 orfs_area
+        10       F3 +4.979(F3)    +4.980    0.242h  L? A? c1.004247090674939 orfs_area
+        11       F3 +4.980(F3)    +4.980    0.266h  L? A? c0.849023821490037 orfs_speed
+        12       F3 +4.980(F3)    +4.980    0.288h  L? A? c0.8810951195763259 orfs_speed
+        13       F3 +1.970(F3)    +4.980    0.325h  L? A? c0.35566540009471637 orfs_speed
+        14       F3 +4.980(F3)    +4.980    0.349h  L? A? c0.9498431671567498 orfs_speed
+        15       F3 +4.978(F3)    +4.980    0.374h  L? A? c0.7004212979614938 orfs_speed
+        16       F3 +4.980(F3)    +4.980    0.397h  L? A? c1.0127080845108072 orfs_speed
+        17       F3 +4.980(F3)    +4.980    0.420h  L? A? c1.1364006232855248 plain
+
+
+
+
+python3 optimizer/run_funnel_optimizer.py --design tinymac_accel --platform asap7 --budget-hours 5 --max-tier 3 --sampler tpe --promotion linucb
+  Surrogate loaded from /home/shashwat/voiceAI/optimizer/surrogate_n45.joblib (fitted=True, n_rows=44)
+  Space: 18 axes: ['mac_lanes', 'accumulator_width', 'clock_period_ns', 'abc_recipe', 'CORE_ASPECT_RATIO', 'CORE_MARGIN', 'PLACE_DENSITY_LB_ADDON', 'CELL_PAD_IN_SITES_GLOBAL_PLACEMENT', 'CELL_PAD_IN_SITES_DETAIL_PLACEMENT', 'CTS_CLUSTER_SIZE', 'CTS_CLUSTER_DIAMETER', 'TNS_END_PERCENT', 'SETUP_SLACK_MARGIN', 'ROUTING_LAYER_ADJUSTMENT', 'RECOVER_POWER', 'DETAILED_ROUTE_END_ITERATION', 'MIN_PLACE_STEP_COEF', 'MAX_PLACE_STEP_COEF']
+
+  Campaign campaign_0_1781209025
+  sampler=tpe promotion=linucb budget=5.00h seed=0 table=no
+   Episode Fidelity    Reward      Best  Spent(h) Config
+  -------- -------- --------- --------- --------- ----------------------------------------
+
+-tier 2 --sampler tpe --promotion fixed
+  Surrogate loaded from /home/shashwat/voiceAI/optimizer/surrogate_n45.joblib (fitted=True, n_rows=44)
+  Space: 7 axes: ['clock_period_ns', 'abc_recipe', 'CORE_ASPECT_RATIO', 'CORE_MARGIN', 'PLACE_DENSITY_LB_ADDON', 'CELL_PAD_IN_SITES_GLOBAL_PLACEMENT', 'CELL_PAD_IN_SITES_DETAIL_PLACEMENT']
+
+  Campaign campaign_0_1781206393
+  sampler=tpe promotion=fixed budget=4.00h seed=0 table=no
+   Episode Fidelity    Reward      Best  Spent(h) Config
+  -------- -------- --------- --------- --------- ----------------------------------------
+         1       F3 +4.965(F3)    +4.965    0.025h  L? A? c1.232982956676452 orfs_speed
+         2       F3 +4.980(F3)    +4.980    0.048h  L? A? c0.9518505820038221 orfs_speed
+         3       F3 +4.845(F3)    +4.980    0.071h  L? A? c1.6228664766147458 orfs_area
+         4       F3 +4.776(F3)    +4.980    0.096h  L? A? c1.9059371589842926 orfs_speed
+         5       F3 +4.928(F3)    +4.980    0.117h  L? A? c1.3405627286281163 orfs_area
+         6       F3 +4.897(F3)    +4.980    0.143h  L? A? c1.440084378350871 plain
+         7       F3 +4.979(F3)    +4.980    0.162h  L? A? c0.6550904853612189 orfs_area
+         8       F3 +1.972(F3)    +4.980    0.199h  L? A? c0.5349110172926435 plain
+         9       F3 +4.764(F3)    +4.980    0.220h  L? A? c1.9604938499235731 orfs_area
+        10       F3 +4.979(F3)    +4.980    0.242h  L? A? c1.004247090674939 orfs_area
+        11       F3 +4.980(F3)    +4.980    0.266h  L? A? c0.849023821490037 orfs_speed
+        12       F3 +4.980(F3)    +4.980    0.288h  L? A? c0.8810951195763259 orfs_speed
+        13       F3 +1.970(F3)    +4.980    0.325h  L? A? c0.35566540009471637 orfs_speed
+        14       F3 +4.980(F3)    +4.980    0.349h  L? A? c0.9498431671567498 orfs_speed
+        15       F3 +4.978(F3)    +4.980    0.374h  L? A? c0.7004212979614938 orfs_speed
+        16       F3 +4.980(F3)    +4.980    0.397h  L? A? c1.0127080845108072 orfs_speed
+        17       F3 +4.980(F3)    +4.980    0.420h  L? A? c1.1364006232855248 plain
+        18       F3 +4.980(F3)    +4.980    0.444h  L? A? c1.1331295182531442 plain
+        19       F3 +4.877(F3)    +4.980    0.467h  L? A? c1.5111547609331648 plain
+        20       F3 +4.980(F3)    +4.980    0.492h  L? A? c1.1575814285556891 plain
+        21       F3 +4.813(F3)    +4.980    0.518h  L? A? c1.749882959866648 plain
+        22       F3 +4.980(F3)    +4.980    0.543h  L? A? c1.1757664593438255 plain
+        23       F3 +4.980(F3)    +4.980    0.567h  L? A? c1.0740612486325118 plain
+        24       F3 +4.931(F3)    +4.980    0.591h  L? A? c1.332161570765457 plain
+        25       F3 +4.980(F3)    +4.980    0.615h  L? A? c1.077896145120162 plain
+        26       F3 +4.980(F3)    +4.980    0.638h  L? A? c0.7662745885751083 plain
+        27       F3 +4.980(F3)    +4.980    0.661h  L? A? c1.0952252266528901 plain
+        28       F3 +4.931(F3)    +4.980    0.686h  L? A? c1.3327546903703573 plain
+        29       F3 +1.973(F3)    +4.980    0.719h  L? A? c0.5686540561242891 plain
+        30       F3 +4.962(F3)    +4.980    0.742h  L? A? c1.2422154303028954 plain
+        31       F3 +4.883(F3)    +4.980    0.767h  L? A? c1.4872233350376713 plain
+        32       F3 +4.980(F3)    +4.980    0.791h  L? A? c1.0264018477109251 plain
+        33       F3 +4.976(F3)    +4.980    0.830h  L? A? c0.8687334369267163 orfs_speed
+        34       F3 +4.980(F3)    +4.980    0.854h  L? A? c1.0527026554041763 orfs_speed
+
+
+
+
+shashwat@pscalr6:~/voiceAI$ ls -lh optimizer/gen2/build/gcd/
+ls: cannot access 'optimizer/gen2/build/gcd/': No such file or directory
+

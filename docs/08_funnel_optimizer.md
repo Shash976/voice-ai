@@ -370,6 +370,46 @@ F3 throughput on the VM is ~8 serial full flows/hour (~14/h with 2 concurrent).
 5. **PPO upgrade of the promotion policy** — only if table-simulation shows the
    bandit's myopia measurably loses to lookahead.
 
+## Visualizing a campaign (`optimizer/viz/`)
+
+Every `run_funnel_optimizer.py` campaign appends one JSONL row per episode
+(`config`, `fidelity`, `f3_reward`, `episode_reward`, `best_reward`, `spent_s`).
+`optimizer/viz/` turns those logs into graphs. Needs `optuna-dashboard`
+(`pip install optuna-dashboard`); plotly/pandas are already present.
+
+**Static HTML report** — reward-vs-each-parameter scatters (coloured by the
+fidelity the episode died at), optimization history vs episode and vs wall-clock,
+the fidelity funnel, the F3 reward distribution, plus Optuna param-importance /
+slice / parallel-coordinate / contour:
+
+```bash
+python3 optimizer/viz/report.py                              # latest campaign in the default log
+python3 optimizer/viz/report.py --log tinymac_accel_run1.jsonl --open
+python3 optimizer/viz/report.py --campaign all               # pool every campaign in the file
+```
+
+Writes a single self-contained `optimizer/report_<campaign_id>.html` (Plotly via
+CDN, no server). `--campaign` takes a `campaign_id`, `latest`, or `all`.
+
+**Live Optuna dashboard** — reconstructs an Optuna study (direction=maximize,
+value = `f3_reward` if reached else the `episode_reward` penalty) into a
+`JournalStorage` file and launches `optuna-dashboard`. With `--live` it tails the
+log and appends new episodes; the dashboard auto-refreshes, so you watch
+history / importances update as the optimizer runs:
+
+```bash
+# follow a run started in another terminal, then open http://127.0.0.1:8080/
+python3 optimizer/viz/dashboard.py --live --log tinymac_accel_run1.jsonl
+python3 optimizer/viz/dashboard.py                           # one-shot snapshot of the latest campaign
+python3 optimizer/viz/dashboard.py --no-serve                # rebuild the study file only
+```
+
+Objective convention: killed/aborted episodes are kept (not dropped) so the
+plots show *where in parameter space designs die* — that is part of "how reward
+changed with parameters", and the failure-ladder penalties (−20…−100) read as
+the low tail of the objective. `campaign_data.py` is the shared loader both tools
+use, so the static report and the live dashboard never disagree.
+
 Items now closed (were listed as gaps in earlier versions of this doc):
 - **Optuna candidate generation** — built and validated (`gen2/candidates.py`,
   three samplers: tpe/surrogate_ucb/random, F3-only tell rule). See section above.
