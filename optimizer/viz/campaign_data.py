@@ -27,7 +27,22 @@ from pathlib import Path
 from typing import Any, Iterable
 
 # ── default location ──────────────────────────────────────────────────────────
-DEFAULT_LOG = Path(__file__).resolve().parents[1] / "results_funnel_campaigns.jsonl"
+def _find_latest_campaign_log() -> Path:
+    """Return the most-recently-modified results_funnel_campaigns.jsonl under
+    optimizer/campaigns/<design>/<platform>/; fall back to the old flat path."""
+    campaigns_root = Path(__file__).resolve().parents[1] / "campaigns"
+    if campaigns_root.exists():
+        logs = sorted(
+            campaigns_root.rglob("results_funnel_campaigns.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if logs:
+            return logs[0]
+    return Path(__file__).resolve().parents[1] / "results_funnel_campaigns.jsonl"
+
+
+DEFAULT_LOG = _find_latest_campaign_log()
 
 _FIDELITY_ORDER = ["F0", "F1", "F2", "F3"]
 

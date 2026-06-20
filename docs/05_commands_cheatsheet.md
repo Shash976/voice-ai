@@ -196,6 +196,25 @@ PHYSICAL_MOCK=1 python3 optimizer/run_funnel_optimizer.py \
     --table optimizer/results_funnel.jsonl
 ```
 
+Campaign logs are written to
+`optimizer/campaigns/<design>/<platform>/results_funnel_campaigns.jsonl`
+(printed as `Results →` at run end). Use `--out /path.jsonl` to override.
+
+**Visualize a campaign** (`pip install optuna-dashboard plotly` once):
+```bash
+LOG=optimizer/campaigns/tinymac_accel/nangate45/results_funnel_campaigns.jsonl
+
+# Static self-contained HTML report (reward vs params, history, funnel, importances):
+python3 optimizer/viz/report.py                        # auto-finds latest log
+python3 optimizer/viz/report.py --log $LOG --open      # specific log, open in browser
+python3 optimizer/viz/report.py --log $LOG --campaign all  # pool all campaigns in file
+
+# Live Optuna dashboard (auto-refreshes while the optimizer runs):
+python3 optimizer/viz/dashboard.py --live --log $LOG   # http://127.0.0.1:8080/
+python3 optimizer/viz/dashboard.py                     # one-shot snapshot, latest campaign
+python3 optimizer/viz/dashboard.py --no-serve --log $LOG  # rebuild JournalStorage only
+```
+
 ---
 
 ## 5. Stage 6 — RTL → GDS  🚧 GDS produced

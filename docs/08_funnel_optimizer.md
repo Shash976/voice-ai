@@ -370,6 +370,21 @@ F3 throughput on the VM is ~8 serial full flows/hour (~14/h with 2 concurrent).
 5. **PPO upgrade of the promotion policy** — only if table-simulation shows the
    bandit's myopia measurably loses to lookahead.
 
+## Campaign output path
+
+Each run of `run_funnel_optimizer.py` appends one JSONL row per episode to:
+
+```
+optimizer/campaigns/<design>/<platform>/results_funnel_campaigns.jsonl
+```
+
+e.g. `optimizer/campaigns/tinymac_accel/nangate45/results_funnel_campaigns.jsonl`.
+The path is printed at the end of every campaign (`Results → ...`). Override with
+`--out /your/path.jsonl`. A per-campaign trace is also written alongside as
+`funnel_campaign_<seed>_<ts>.jsonl`.
+
+---
+
 ## Visualizing a campaign (`optimizer/viz/`)
 
 Every `run_funnel_optimizer.py` campaign appends one JSONL row per episode
@@ -383,9 +398,14 @@ the fidelity funnel, the F3 reward distribution, plus Optuna param-importance /
 slice / parallel-coordinate / contour:
 
 ```bash
-python3 optimizer/viz/report.py                              # latest campaign in the default log
-python3 optimizer/viz/report.py --log tinymac_accel_run1.jsonl --open
-python3 optimizer/viz/report.py --campaign all               # pool every campaign in the file
+# auto-finds the most-recently-modified results_funnel_campaigns.jsonl under campaigns/
+python3 optimizer/viz/report.py
+
+# point at a specific log
+python3 optimizer/viz/report.py \
+    --log optimizer/campaigns/tinymac_accel/nangate45/results_funnel_campaigns.jsonl --open
+
+python3 optimizer/viz/report.py --campaign all   # pool every campaign in the file
 ```
 
 Writes a single self-contained `optimizer/report_<campaign_id>.html` (Plotly via
@@ -398,10 +418,16 @@ log and appends new episodes; the dashboard auto-refreshes, so you watch
 history / importances update as the optimizer runs:
 
 ```bash
-# follow a run started in another terminal, then open http://127.0.0.1:8080/
-python3 optimizer/viz/dashboard.py --live --log tinymac_accel_run1.jsonl
-python3 optimizer/viz/dashboard.py                           # one-shot snapshot of the latest campaign
-python3 optimizer/viz/dashboard.py --no-serve                # rebuild the study file only
+LOG=optimizer/campaigns/tinymac_accel/nangate45/results_funnel_campaigns.jsonl
+
+# follow a live run (open http://127.0.0.1:8080/ in browser)
+python3 optimizer/viz/dashboard.py --live --log $LOG
+
+# one-shot snapshot of the latest campaign across all designs
+python3 optimizer/viz/dashboard.py
+
+# rebuild the JournalStorage file without launching the server
+python3 optimizer/viz/dashboard.py --no-serve --log $LOG
 ```
 
 Objective convention: killed/aborted episodes are kept (not dropped) so the
