@@ -16,6 +16,7 @@ from .campaign_data import (
     CampaignData,
     load_campaign_rows,
     build_study,
+    obs_objective,
 )
 
-__all__ = ["CampaignData", "load_campaign_rows", "build_study"]
+__all__ = ["CampaignData", "load_campaign_rows", "build_study", "obs_objective"]
