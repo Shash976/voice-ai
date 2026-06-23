@@ -27,7 +27,7 @@ Usage:
 
 Options:
     --space PATH       search_space_funnel.yaml  (default: search_space_funnel.yaml)
-    --out PATH         output jsonl              (default: results_funnel.jsonl)
+    --out PATH         output jsonl              (default: results/gen2/results_funnel.jsonl)
     --fidelity F0|F1|F2  target fidelity         (default: F2)
     --limit N          max evaluations to run    (default: no limit)
     --subset strategic  corner+axis sweep (~54-87 deduped configs instead of 594)
@@ -651,7 +651,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--out",
-        default=str(_THIS_DIR.parent / "results_funnel.jsonl"),
+        default=str(_THIS_DIR.parent / "results" / "gen2" / "results_funnel.jsonl"),
         help="Output JSONL file path",
     )
     parser.add_argument(
