@@ -44,11 +44,16 @@ _sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
 # ── Paths ──────────────────────────────────────────────────────────────────────
 
 _REPO     = Path(__file__).resolve().parent.parent.parent
+_OPTIMIZER = Path(__file__).resolve().parent.parent       # optimizer/
+_RUN_DIR  = _REPO / "physical" / "orfs" / "runs"
+_RPT_DIR  = _RUN_DIR / "reports" / "nangate45" / "tinymac_accel"
+_LOG_DIR  = _RUN_DIR / "logs"    / "nangate45" / "tinymac_accel"
+_PROXY_DIR = _RUN_DIR / "proxy"
+# Legacy classic-flow location for sweep CSVs (kept for back-compat; usually empty).
 _MAKE_DIR = _REPO / "physical" / "orfs" / "make"
-_RPT_DIR  = _MAKE_DIR / "reports" / "nangate45" / "tinymac_accel"
-_LOG_DIR  = _MAKE_DIR / "logs"    / "nangate45" / "tinymac_accel"
-_PROXY_DIR = _MAKE_DIR / "proxy"
-_OUT_MODEL = Path(__file__).resolve().parent.parent / "surrogate_n45.joblib"
+# Where live campaigns now log per-fidelity rows: campaigns/<design>/<platform>/*.jsonl
+_CAMPAIGN_DIR = _OPTIMIZER / "campaigns"
+_OUT_MODEL = Path(__file__).resolve().parent.parent / "results" / "gen2" / "surrogate_n45.joblib"
 
 # ── Vendored regexes from physical_runner.py (identical; keep in sync) ────────
 # Source: physical_runner._parse_metrics, checked 2026-06-11
@@ -217,6 +222,111 @@ def _proxy_key_for_variant(variant: str) -> str:
     return m.group(1) if m else variant
 
 
+# ── Campaign JSONL mining (the real F3 data lives here now) ─────────────────────
+# The historical report tree (physical/orfs/runs/reports/...) is no longer
+# present; live campaigns write per-fidelity rows to
+# campaigns/<design>/<platform>/*.jsonl with the full PPA dict under "obs".
+
+def _rtl_hash_from_gds(gds: str | None) -> str:
+    """Extract the 6–8 hex RTL/knob content hash from a GDS path variant name.
+
+    Variant names look like 'gcd_L4_A24_c1p233_r5009f224'; the '_r<hex>' tail is
+    the content hash physical_runner embeds.  Used as the surrogate's context
+    feature so distinct designs/RTL versions do not alias.
+    """
+    if not gds:
+        return "unknown"
+    m = re.search(r"_r([0-9a-fA-F]{6,8})", str(gds))
+    return m.group(1) if m else "unknown"
+
+
+def _campaign_row_to_training(row: dict) -> dict | None:
+    """Convert one campaign JSONL F3 row into a flat training row, or None.
+
+    Only F3 rows with status ok/mock and a parsed area_um2 are usable as
+    training targets.  Returns the same flat schema as the report miner so the
+    two sources merge cleanly.
+    """
+    if row.get("fidelity") != "F3":
+        return None
+    obs = row.get("obs")
+    if not isinstance(obs, dict):
+        return None
+    if obs.get("status", row.get("status", "ok")) not in ("ok", "mock"):
+        return None
+    if obs.get("area_um2") is None:
+        return None
+
+    cfg = row.get("config") or {}
+    lanes = obs.get("lanes") or cfg.get("mac_lanes") or cfg.get("lanes") or 4
+    acc_w = obs.get("acc_w") or cfg.get("accumulator_width") or cfg.get("acc_w") or 24
+    clk   = obs.get("clk_ns") or cfg.get("clock_period_ns") or cfg.get("clk_ns")
+    abc   = obs.get("effective_abc_recipe") or cfg.get("abc_recipe") or cfg.get("abc")
+    platform = row.get("platform") or obs.get("platform") or "nangate45"
+
+    period_ns = obs.get("period_min_ns")
+    if period_ns is None and obs.get("fmax_mhz"):
+        period_ns = 1000.0 / float(obs["fmax_mhz"])
+
+    return {
+        "lanes":   int(lanes),
+        "acc_w":   int(acc_w),
+        "clk_ns":  float(clk) if clk is not None else None,
+        # util/density are frozen at the funnel defaults unless a knob overrode them
+        "util":    cfg.get("CORE_UTILIZATION", 40),
+        "density": cfg.get("PLACE_DENSITY", 0.60),
+        "abc":     abc,
+        "platform": platform,
+        "area_um2":  obs.get("area_um2"),
+        "period_ns": period_ns,
+        "fmax_mhz":  obs.get("fmax_mhz"),
+        "power_mw":  obs.get("power_mw"),
+        "wns_ns":    obs.get("wns_ns"),
+        "tns_ns":    obs.get("tns_ns"),
+        "setup_viol": obs.get("setup_viol"),
+        "timing_met": obs.get("timing_met"),
+        "rtl_hash":  _rtl_hash_from_gds(obs.get("gds")),
+        "status":    "ok",
+    }
+
+
+def _mine_campaign_rows(design: str | None = None,
+                        platform: str | None = None) -> list[dict]:
+    """Mine all real F3/ok rows from campaigns/<design>/<platform>/*.jsonl.
+
+    Optional `design`/`platform` filters restrict to one design or PDK (e.g.
+    train a clean nangate45-only or gcd-only surrogate).  Each returned row is
+    tagged with its provenance ("design", "platform", "variant").
+    """
+    rows: list[dict] = []
+    if not _CAMPAIGN_DIR.is_dir():
+        return rows
+    for jf in sorted(_CAMPAIGN_DIR.rglob("*.jsonl")):
+        parts = jf.relative_to(_CAMPAIGN_DIR).parts
+        d = parts[0] if len(parts) >= 1 else "unknown"
+        p = parts[1] if len(parts) >= 2 else "unknown"
+        if design and d != design:
+            continue
+        if platform and p != platform:
+            continue
+        for line in _read(jf).splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            tr = _campaign_row_to_training(row)
+            if tr is None:
+                continue
+            tr["design"] = d
+            tr.setdefault("platform", p)
+            tr["variant"] = f"{d}/{jf.stem}"
+            rows.append(tr)
+    return rows
+
+
 # ── CSV fallback ───────────────────────────────────────────────────────────────
 
 def _read_sweep_csv(csv_path: Path) -> list[dict]:
@@ -253,58 +363,77 @@ def _read_sweep_csv(csv_path: Path) -> list[dict]:
 
 # ── Main data mining ───────────────────────────────────────────────────────────
 
-def mine_training_rows() -> list[dict]:
+def _dedup_key(r: dict) -> tuple:
+    """Identity of a build for deduplication: design + platform + RTL axes + recipe."""
+    return (
+        str(r.get("design", "")),
+        str(r.get("platform", "nangate45")),
+        int(r.get("lanes", 0) or 0),
+        int(r.get("acc_w", 0) or 0),
+        round(float(r.get("clk_ns", 0.0) or 0.0), 4),
+        str(r.get("abc", "") or ""),
+    )
+
+
+def mine_training_rows(design: str | None = None,
+                       platform: str | None = None) -> list[dict]:
     """Extract and return all available training rows.
 
-    Sources (in order of priority; deduplication by (lanes, acc_w, clk_ns, abc)):
-    1. Direct report parsing of all variant dirs with 6_finish.rpt
-    2. sweep_results*.csv (fallback — may have fewer columns)
+    Sources (in priority order; deduplicated by design/platform/RTL-axes/recipe):
+    1. Live campaign JSONL (campaigns/<design>/<platform>/*.jsonl) — the real F3
+       data the optimizer now produces. **Primary source.**
+    2. Direct report parsing of legacy variant dirs with 6_finish.rpt (usually
+       absent — the classic report tree was not retained).
+    3. sweep_results*.csv (legacy fallback — usually absent).
+
+    `design`/`platform` optionally restrict to one design or PDK.
     """
     rows: list[dict] = []
     seen: set[tuple] = set()
 
-    # Source 1: variant dirs
-    variant_dirs = sorted(_RPT_DIR.iterdir()) if _RPT_DIR.is_dir() else []
-    for vdir in variant_dirs:
-        vname = vdir.name
-        if vname == "base":
+    # Source 1: live campaign logs (the real terminal-reward data)
+    for r in _mine_campaign_rows(design=design, platform=platform):
+        if r.get("area_um2") is None:
             continue
-        parsed = _parse_variant_name(vname)
-        if parsed is None:
-            continue
-
-        f3 = _extract_f3_metrics(vname)
-        if f3 is None:
-            continue
-
-        key = (parsed["lanes"], parsed["acc_w"], parsed["clk_ns"],
-               str(parsed.get("abc", "")))
+        key = _dedup_key(r)
         if key in seen:
             continue
         seen.add(key)
+        rows.append(r)
 
-        # F2 proxy observables
-        pkey = _proxy_key_for_variant(vname)
-        obs = _extract_proxy_obs(pkey)
+    # Source 2: legacy report variant dirs (nangate45/tinymac only)
+    if platform in (None, "nangate45"):
+        variant_dirs = sorted(_RPT_DIR.iterdir()) if _RPT_DIR.is_dir() else []
+        for vdir in variant_dirs:
+            vname = vdir.name
+            if vname == "base":
+                continue
+            parsed = _parse_variant_name(vname)
+            if parsed is None:
+                continue
+            f3 = _extract_f3_metrics(vname)
+            if f3 is None:
+                continue
+            pkey = _proxy_key_for_variant(vname)
+            obs = _extract_proxy_obs(pkey)
+            row = {**parsed, **f3, **obs,
+                   "variant": vname, "platform": "nangate45",
+                   "design": "tinymac_accel"}
+            key = _dedup_key(row)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
 
-        row = {**parsed, **f3}
-        row.update(obs)  # merge F2 obs directly into the row
-        row["variant"] = vname
-        row["platform"] = "nangate45"
-        rows.append(row)
-
-    # Source 2: sweep CSV (add rows not already seen)
+    # Source 3: sweep CSV (legacy)
     for csv_path in sorted(_MAKE_DIR.glob("sweep_results*.csv")):
         for r in _read_sweep_csv(csv_path):
-            lanes = int(r.get("lanes", 0) or 0)
-            acc_w = int(r.get("acc_w", 0) or 0)
-            clk   = float(r.get("clk_ns", 0.0) or 0.0)
-            abc   = str(r.get("abc", "") or "")
-            key = (lanes, acc_w, clk, abc)
-            if key in seen or lanes == 0:
+            r.setdefault("platform", "nangate45")
+            r.setdefault("design", "tinymac_accel")
+            if r.get("area_um2") is None or int(r.get("lanes", 0) or 0) == 0:
                 continue
-            # CSV rows already have period_ns mapped above
-            if r.get("area_um2") is None:
+            key = _dedup_key(r)
+            if key in seen:
                 continue
             seen.add(key)
             rows.append(r)
@@ -315,19 +444,42 @@ def mine_training_rows() -> list[dict]:
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main():
+    import argparse
+    from collections import Counter
+
     from gen2.surrogate import Surrogate
 
+    ap = argparse.ArgumentParser(description="Fit + CP3-validate the PPA surrogate.")
+    ap.add_argument("--design", default=None,
+                    help="restrict training data to one design (e.g. gcd, tinymac_accel)")
+    ap.add_argument("--platform", default=None,
+                    help="restrict training data to one PDK (e.g. nangate45, asap7)")
+    args, _ = ap.parse_known_args()
+
     print("=" * 65)
-    print("fit_surrogate.py — TinyMAC Surrogate CP3 validation")
+    print("fit_surrogate.py — PPA Surrogate CP3 validation")
     print("=" * 65)
 
     # ── 1. Mine data ──────────────────────────────────────────────────────────
     print("\n[1] Mining training data...")
-    rows = mine_training_rows()
+    if args.design or args.platform:
+        print(f"    filter: design={args.design or '*'} platform={args.platform or '*'}")
+    rows = mine_training_rows(design=args.design, platform=args.platform)
     print(f"    Found {len(rows)} rows with F3 area_um2 present")
     if len(rows) == 0:
-        print("    ERROR: no data found — check paths")
+        print("    ERROR: no data found — the classic report tree is absent and no")
+        print("    campaign JSONL F3/ok rows matched. Build real F3 data first")
+        print("    (see roadmap R8) or relax --design/--platform.")
         sys.exit(1)
+
+    # Provenance breakdown — be explicit about WHAT this surrogate is fit on.
+    prov = Counter((r.get("design", "?"), r.get("platform", "?")) for r in rows)
+    print("    Provenance (design, platform → rows):")
+    for (d, p), n in sorted(prov.items()):
+        print(f"      {d:18s} {p:10s}  {n}")
+    if len({d for d, _ in prov} ) > 1:
+        print("    NOTE: corpus spans multiple designs — the surrogate conflates them")
+        print("    via rtl_hash/platform context only. Use --design for a clean fit.")
 
     # Print a quick summary of what we mined
     lanes_seen = sorted({r["lanes"] for r in rows})
@@ -427,6 +579,7 @@ def main():
 
     # ── 5. Save ───────────────────────────────────────────────────────────────
     print(f"\n[5] Saving model to {_OUT_MODEL} ...")
+    _OUT_MODEL.parent.mkdir(parents=True, exist_ok=True)
     s.save(_OUT_MODEL)
     size_kb = _OUT_MODEL.stat().st_size / 1024
     print(f"    Saved ({size_kb:.1f} KB)")
