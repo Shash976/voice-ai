@@ -676,7 +676,7 @@ if __name__ == "__main__":
 
     # ── TEST 5: surrogate_ucb path with real saved surrogate ──────────────────
     print("\n--- TEST 5: surrogate_ucb with real surrogate (surrogate_n45.joblib) ---")
-    _surr_path = Path(__file__).resolve().parents[1] / "surrogate_n45.joblib"
+    _surr_path = Path(__file__).resolve().parents[1] / "results" / "gen2" / "surrogate_n45.joblib"
     if _surr_path.exists():
         try:
             from gen2.surrogate import Surrogate

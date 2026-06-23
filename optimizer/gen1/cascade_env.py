@@ -23,7 +23,7 @@ from gen1.cascade import evaluate
 from common.cascade_reward import compute_cascade_reward
 from gen1.env import OptEnv
 
-CASCADE_RESULTS_FILE = Path(__file__).resolve().parent.parent / "results_cascade.jsonl"
+CASCADE_RESULTS_FILE = Path(__file__).resolve().parent.parent / "results" / "gen1" / "results_cascade.jsonl"
 DEFAULT_SPACE = Path(__file__).resolve().parent / "search_space_full.yaml"
 
 
@@ -114,6 +114,7 @@ class CascadeOptEnv(OptEnv):
     # ── Logging (override OptEnv's module-global path) ────────────────────────
 
     def _log(self, record: dict) -> None:
+        self._results_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self._results_file, "a") as f:
             f.write(json.dumps(record) + "\n")
 

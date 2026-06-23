@@ -43,7 +43,7 @@ import streamlit as st
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-RESULTS_FILE = Path(__file__).resolve().parent.parent / "results.jsonl"
+RESULTS_FILE = Path(__file__).resolve().parent.parent / "results" / "gen1" / "results.jsonl"
 # Import SW_BASELINE_CYCLES from the single source of truth (constants.py).
 # Exposed as SW_BASELINE for backward compatibility with callers in this file.
 try:

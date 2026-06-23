@@ -613,7 +613,7 @@ def _run_campaign(
                     act = info.get("action", action)
                     if act == "kill":
                         n_killed += 1
-                    elif fid == "F3":
+                    elif fid == "F3" and not info.get("table_miss"):
                         n_committed += 1
 
             n_configs += 1
@@ -626,7 +626,11 @@ def _run_campaign(
             # for the benchmark metric we use it directly since this is the same
             # reward that agents are optimizing.
             fid_reached = info.get("fidelity", "?") if episode_done else "?"
-            if fid_reached == "F3" and episode_done:
+            is_table_miss = bool(info.get("table_miss"))
+            # A real F3 commit (not a table_miss) is the only thing that updates
+            # the incumbent / counts toward the optimum (audit EXP-F6): a
+            # table_miss carries no terminal data and must not be scored.
+            if fid_reached == "F3" and episode_done and not is_table_miss:
                 final_reward = float(episode_reward)
 
                 # Feed back to CandidateGenerator (F3-only tell rule)
@@ -639,9 +643,13 @@ def _run_campaign(
                     if best_reward >= target_reward and time_to_target_s == budget_s:
                         time_to_target_s = simulated_s
             else:
-                # Non-F3 result: feed as kill to CandidateGenerator
+                # Non-F3 / table_miss result: feed to CandidateGenerator as a skip
+                # (table_miss is missing data, not a measured reward).
                 if _cand_gen is not None:
-                    _cand_gen.update(config, episode_reward, fidelity=fid_reached or "F0")
+                    _cand_gen.update(
+                        config, episode_reward,
+                        fidelity=("table_miss" if is_table_miss else (fid_reached or "F0")),
+                    )
 
         return {
             "best_reward":        best_reward,
@@ -732,11 +740,19 @@ def run_benchmark(
         grid_configs.append(cfg)
 
     # Find table optimum: maximum F3 reward as computed by FunnelEnv.
-    # We do a quick "commit" scan over all F3-populated configs using a throw-away
-    # FunnelEnv (infinite budget, temp log) so the optimum uses the exact same
-    # reward formula that the benchmark campaign will see.
+    # We do a quick "commit" scan over configs that have a REAL F3 row, using a
+    # throw-away FunnelEnv (infinite budget, temp log) so the optimum uses the
+    # exact same reward formula the benchmark campaign will see.
+    #
+    # CRITICAL (audit EXP-F1): configs WITHOUT a real F3 row must be excluded
+    # from the optimum.  Committing them yields a table_miss, which previously
+    # returned -20 and silently became the "optimum" on an F3-less table — the
+    # benchmark then "measured" agents against a -20 failure floor and the
+    # guard below never fired.  We now skip them and require ≥1 real F3 row.
+    from gen2.funnel import _config_key as _ck
     import tempfile as _tmpfile
     f3_rewards: list[float] = []
+    n_table_miss = 0
 
     with _tmpfile.TemporaryDirectory() as _tmpdir:
         _scan_env = FunnelEnv(
@@ -745,26 +761,37 @@ def run_benchmark(
             results_path=Path(_tmpdir) / "scan.jsonl",
         )
         for _cfg in grid_configs:
+            if "F3" not in (table.get(_ck(_cfg)) or {}):
+                n_table_miss += 1
+                continue   # no real terminal data — must not define the optimum
             try:
                 _scan_env.reset(_cfg)
-                _, _r, _, _ = _scan_env.step("commit")
+                _, _r, _, _info = _scan_env.step("commit")
+                if _info.get("table_miss"):
+                    n_table_miss += 1
+                    continue
                 f3_rewards.append(float(_r))
             except Exception:
                 pass
 
     if not f3_rewards:
-        raise ValueError("Table has no F3 rows — cannot define the optimum.")
+        raise ValueError(
+            f"Benchmark table has 0 real F3 rows across {len(grid_configs)} "
+            "scanned configs — the optimum is undefined and no verdict can be "
+            "rendered. Point --table at a file with real F3/ok rows (e.g. a "
+            "campaign log under optimizer/campaigns/), pass --include-campaigns, "
+            "or build F3 rows first. (See audit EXP-F1.)"
+        )
     table_optimum = max(f3_rewards)
     target_reward = table_optimum * target_pct
 
     if verbose:
         print(f"Table: {len(grid_configs)} configs, "
+              f"{len(f3_rewards)} with real F3 rows, "
               f"optimum F3 reward = {table_optimum:.4f}, "
               f"target (={target_pct*100:.0f}%) = {target_reward:.4f}")
-        f3_count = sum(1 for e in table.values() if "F3" in e)
-        print(f"       {f3_count}/{len(table)} configs have F3 rows; "
-              f"{len(table)-f3_count} table-miss commits return "
-              f"{MISSING_F3_COMMIT_REWARD:.0f} via FunnelEnv (documented).")
+        print(f"       {n_table_miss} configs lack an F3 row → excluded from the "
+              f"optimum and from agent scoring (non-scoring, not a -20 failure).")
         print()
 
     results: dict[str, dict] = {}
@@ -1002,8 +1029,46 @@ def _selftest(verbose: bool = True) -> None:
 
 # ── FunnelEnv integration mode ─────────────────────────────────────────────────
 
+def _is_real_f3(row: dict) -> bool:
+    """True if an F3 row carries a usable measurement (parsed area, ok status).
+
+    Episode-summary campaign logs (e.g. run1.jsonl) contain F3 rows with no
+    `obs` dict; merging those would overwrite real-obs F3 rows for the same
+    config. We only accept F3 rows with a real PPA observation.
+    """
+    obs = row.get("obs")
+    return (isinstance(obs, dict)
+            and obs.get("area_um2") is not None
+            and obs.get("status", row.get("status", "ok")) in ("ok", "mock"))
+
+
+def _merge_tables(paths: list[Path]) -> dict:
+    """Load and merge several results_funnel-format JSONL files into one table.
+
+    Later files' fidelity rows update earlier ones for the same config key, so
+    a config's F0/F1/F2/F3 rows can be assembled from multiple sources. F3 rows
+    without a real measurement are dropped (see _is_real_f3) so summary logs do
+    not clobber real terminal data.
+    """
+    merged: dict[str, dict] = {}
+    for p in paths:
+        t = load_table(str(p))
+        for k, entry in t.items():
+            for fid, row in entry.items():
+                if fid == "F3" and not _is_real_f3(row):
+                    continue
+                merged.setdefault(k, {})[fid] = row
+    return merged
+
+
+def _campaign_jsonl_paths() -> list[Path]:
+    """All campaign logs under optimizer/campaigns/<design>/<platform>/*.jsonl."""
+    camp = _OPT_DIR / "campaigns"
+    return sorted(camp.rglob("*.jsonl")) if camp.is_dir() else []
+
+
 def _run_with_funnel_env(
-    table_path: Path,
+    table_paths: list[Path],
     agent_names: list[str],
     n_seeds: int,
     budget_s: float,
@@ -1011,23 +1076,27 @@ def _run_with_funnel_env(
     pretrain_campaigns: int,
     candidates: str = "shuffled",
 ) -> None:
-    """Run the benchmark using the real FunnelEnv + load_table."""
+    """Run the benchmark using the real FunnelEnv + merged load_table sources."""
     if not _FUNNEL_AVAILABLE:
         print(f"WARNING: funnel.py not available ({_FUNNEL_IMPORT_ERROR}).")
         print("Falling back to synthetic table for --selftest or re-run after funnel.py lands.")
         return
 
     try:
-        table = load_table(str(table_path))
+        table = _merge_tables(table_paths)
     except Exception as exc:
-        print(f"ERROR loading table from {table_path}: {exc}")
+        print(f"ERROR loading table from {table_paths}: {exc}")
         print("Run build_table.py to populate the table first.")
         sys.exit(1)
 
     if not table:
-        print(f"ERROR: table at {table_path} is empty.  "
-              "Run build_table.py first.")
+        print(f"ERROR: no rows loaded from {[str(p) for p in table_paths]}.  "
+              "Run build_table.py first or pass --include-campaigns.")
         sys.exit(1)
+
+    f3_total = sum(1 for e in table.values() if "F3" in e)
+    print(f"Loaded {len(table)} configs from {len(table_paths)} source(s); "
+          f"{f3_total} have real F3 rows.")
 
     run_benchmark(
         table=table,
@@ -1062,8 +1131,11 @@ def main() -> None:
     parser.add_argument("--selftest", action="store_true",
                         help="Run synthetic-table selftest and exit")
     parser.add_argument("--table",
-                        default=str(_THIS_DIR.parent / "results_funnel.jsonl"),
-                        help="Path to results_funnel.jsonl table")
+                        default=str(_THIS_DIR.parent / "results" / "gen2" / "results_funnel.jsonl"),
+                        help="Path(s) to results_funnel.jsonl table(s); comma-separated to merge")
+    parser.add_argument("--include-campaigns", action="store_true",
+                        dest="include_campaigns",
+                        help="Also merge all real F3 rows from optimizer/campaigns/**/*.jsonl")
     parser.add_argument("--target-pct", type=float, default=0.95,
                         dest="target_pct",
                         help="Fraction of optimum considered 'found'")
@@ -1084,16 +1156,25 @@ def main() -> None:
         return
 
     agent_names = [a.strip() for a in args.agents.split(",") if a.strip()]
-    table_path = Path(args.table)
 
-    if not table_path.exists():
-        print(f"Table file not found: {table_path}")
+    # --table may be a comma-separated list of files; --include-campaigns adds
+    # all real campaign logs (the only source of real F3 rows today).
+    table_paths = [Path(p.strip()) for p in str(args.table).split(",") if p.strip()]
+    if args.include_campaigns:
+        table_paths += _campaign_jsonl_paths()
+
+    missing = [p for p in table_paths if not p.exists()]
+    if missing:
+        print(f"Table file(s) not found: {[str(p) for p in missing]}")
         print("Run: python3 optimizer/build_table.py --subset strategic")
-        print("Or use --selftest to run the synthetic-table selftest.")
+        print("Or use --selftest / --include-campaigns.")
+        sys.exit(1)
+    if not table_paths:
+        print("No table sources given. Use --table PATH or --include-campaigns.")
         sys.exit(1)
 
     _run_with_funnel_env(
-        table_path=table_path,
+        table_paths=table_paths,
         agent_names=agent_names,
         n_seeds=args.seeds,
         budget_s=args.budget,

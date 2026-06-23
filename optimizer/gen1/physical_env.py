@@ -26,7 +26,7 @@ from gen1.env import OptEnv
 from common.physical_reward import behavioral_cycles, compute_physical_reward
 from common.physical_runner import run_physical, run_synth_sta
 
-PHYS_RESULTS_FILE = Path(__file__).resolve().parent.parent / "results_physical.jsonl"
+PHYS_RESULTS_FILE = Path(__file__).resolve().parent.parent / "results" / "gen1" / "results_physical.jsonl"
 
 
 class PhysicalOptEnv(OptEnv):
@@ -129,6 +129,7 @@ class PhysicalOptEnv(OptEnv):
     # ── Logging (override OptEnv's module-global path) ────────────────────────
 
     def _log(self, record: dict) -> None:
+        self._results_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self._results_file, "a") as f:
             f.write(json.dumps(record) + "\n")
 

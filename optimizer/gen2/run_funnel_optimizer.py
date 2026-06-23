@@ -20,8 +20,8 @@ CLI
       --sampler tpe|surrogate_ucb|random \\
       --promotion fixed|linucb|random \\
       --seed 0 \\
-      --table optimizer/results_funnel.jsonl  # omit for live mode
-      --surrogate optimizer/surrogate_n45.joblib   # default: auto-detect
+      --table optimizer/results/gen2/results_funnel.jsonl  # omit for live mode
+      --surrogate optimizer/results/gen2/surrogate_n45.joblib   # default: auto-detect
 
 Table mode (--table given): replays logged observations, charges recorded cost
 against a simulated wall-clock budget.  PHYSICAL_MOCK=1 activates mock metrics
@@ -82,7 +82,7 @@ except Exception as _e:
 
 _OPT_ROOT = Path(__file__).resolve().parents[1]
 _CAMPAIGNS_ROOT = _OPT_ROOT / "campaigns"
-_DEFAULT_SURROGATE = _OPT_ROOT / "surrogate_n45.joblib"
+_DEFAULT_SURROGATE = _OPT_ROOT / "results" / "gen2" / "surrogate_n45.joblib"
 _DEFAULT_SPACE_YAML = Path(__file__).resolve().parent / "search_space_funnel.yaml"
 
 # Fidelity labels in promotion order

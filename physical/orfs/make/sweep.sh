@@ -8,6 +8,9 @@
 # gets its own FLOW_VARIANT, so results/<plat>/<design>/<variant>/6_final.gds
 # can be opened independently in the GUI.
 #
+# Source configs land in make/<platform>/<design>/. ORFS build outputs (logs/,
+# objects/, results/, reports/) go to ../runs/ so make/ stays clean.
+#
 # Usage (on the VM, where /opt/OpenROAD-flow-scripts lives):
 #   physical/orfs/make/sweep.sh                 # default grid on nangate45
 #   physical/orfs/make/sweep.sh sky130hd        # a different PDK
@@ -25,6 +28,7 @@ PLATFORM="${1:-nangate45}"
 DESIGN="tinymac_accel"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+RUNS="$(dirname "$HERE")/runs"
 REPO="$(cd "$HERE/../../.." && pwd)"
 
 # ── The grid: "LANES ACC_W CLK_NS" ──────────────────────────────────────────
@@ -40,7 +44,7 @@ fi
 [ -f "$ORFS/env.sh" ] || { echo "ERROR: ORFS not found at $ORFS (set ORFS_DIR)"; exit 1; }
 
 # ── Stage the RTL (shared by every variant) ─────────────────────────────────
-mkdir -p "$HERE/src/$DESIGN" "$HERE/$PLATFORM/$DESIGN"
+mkdir -p "$HERE/src/$DESIGN" "$HERE/$PLATFORM/$DESIGN" "$RUNS"
 cp "$REPO/rtl/accel/tinymac_accel.v" \
    "$REPO/rtl/accel/int8_mac_array.v" \
    "$REPO/rtl/accel/requantize.v" \
@@ -56,7 +60,7 @@ declare -A PLATFORM_TIME_UNIT=( [nangate45]=1 [asap7]=1000 )
 _TIME_UNIT="${PLATFORM_TIME_UNIT[$PLATFORM]:-1}"
 
 RUN_ID="$(date +%Y%m%dT%H%M%S)"
-CSV="$HERE/sweep_results.csv"
+CSV="$RUNS/sweep_results.csv"
 # Write header only when the file does not yet exist (append mode for all runs).
 if [ ! -f "$CSV" ]; then
     echo "run_id,lanes,acc_w,clk_ns,variant,status,area_um2,util_pct,wns_ns,tns_ns,setup_viol,power_mw,fmax_mhz,timing_met,gds" > "$CSV"
@@ -71,9 +75,9 @@ run_one() {
     local cfgdir="$HERE/$PLATFORM/$DESIGN"
     local gen_sdc="$cfgdir/constraint_${variant}.sdc"
     local gen_cfg="$cfgdir/config_${variant}.mk"
-    local gds="$HERE/results/$PLATFORM/$DESIGN/$variant/6_final.gds"
-    local rpt="$HERE/reports/$PLATFORM/$DESIGN/$variant/6_finish.rpt"
-    local rlog="$HERE/logs/$PLATFORM/$DESIGN/$variant/6_report.log"
+    local gds="$RUNS/results/$PLATFORM/$DESIGN/$variant/6_final.gds"
+    local rpt="$RUNS/reports/$PLATFORM/$DESIGN/$variant/6_finish.rpt"
+    local rlog="$RUNS/logs/$PLATFORM/$DESIGN/$variant/6_report.log"
 
     echo
     echo "════════ $variant  (LANES=$lanes ACC_W=$acc clk=${clk}ns) ════════"
@@ -106,12 +110,12 @@ EOF
     else
         timeout 2400 \
             make --file="$ORFS/flow/Makefile" \
-                 FLOW_HOME="$ORFS/flow" WORK_HOME="$HERE" \
+                 FLOW_HOME="$ORFS/flow" WORK_HOME="$RUNS" \
                  DESIGN_CONFIG="$gen_cfg" FLOW_VARIANT="$variant" \
-                 > "$HERE/sweep_${variant}.log" 2>&1 \
+                 > "$RUNS/sweep_${variant}.log" 2>&1 \
             || make_status=$?
         if [ "$make_status" -ne 0 ]; then
-            echo "  !! make exited with status $make_status — see sweep_${variant}.log"
+            echo "  !! make exited with status $make_status — see $RUNS/sweep_${variant}.log"
         fi
     fi
 
@@ -140,7 +144,7 @@ EOF
         met=$(awk -v w="$wns" 'BEGIN{ if(w=="")print"?"; else if(w+0<0)print"NO"; else print"yes" }')
     else
         status="FAIL"; area=""; util=""; wns=""; tns=""; pw=""; fmax=""; setupv=""; met="?"
-        echo "  !! no finish report — see sweep_${variant}.log"
+        echo "  !! no finish report — see $RUNS/sweep_${variant}.log"
     fi
     [ -f "$gds" ] || gds="(none)"
 
@@ -160,8 +164,8 @@ echo "════════════════════════ S
 column -t -s, "$CSV"
 echo
 echo "CSV: $CSV"
-echo "Open any layout:  klayout results/$PLATFORM/$DESIGN/<variant>/6_final.gds"
+echo "Open any layout:  klayout $RUNS/results/$PLATFORM/$DESIGN/<variant>/6_final.gds"
 echo "Or in the OpenROAD GUI per variant:"
-echo "  make --file=$ORFS/flow/Makefile FLOW_HOME=$ORFS/flow WORK_HOME=$HERE \\"
+echo "  make --file=$ORFS/flow/Makefile FLOW_HOME=$ORFS/flow WORK_HOME=$RUNS \\"
 echo "       DESIGN_CONFIG=$HERE/$PLATFORM/$DESIGN/config_<variant>.mk \\"
 echo "       FLOW_VARIANT=<variant> gui_final"

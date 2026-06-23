@@ -466,7 +466,7 @@ class FunnelEnv:
         budget_s: float = 14400.0,
         surrogate: Any | None = None,
         table: dict | None = None,
-        results_path: str | Path = str(Path(__file__).resolve().parent.parent / "results_funnel.jsonl"),
+        results_path: str | Path = str(Path(__file__).resolve().parent.parent / "results" / "gen2" / "results_funnel.jsonl"),
         seed: int = 0,
         lambda_cost: float = 1.0,
         design: "str | Any | None" = None,
@@ -503,6 +503,7 @@ class FunnelEnv:
         self._f1_obs: dict | None = None
         self._f2_obs: dict | None = None
         self._f3_obs: dict | None = None
+        self._f3_status: str | None = None   # status of the last F3 run (ok/FAIL/table_miss)
         self._done: bool = True        # must call reset() before step()
         self._episode_spent_s: float = 0.0   # cost accumulated in this episode
 
@@ -562,11 +563,16 @@ class FunnelEnv:
         """
         # Validate: use active_space bounds when set (allows generic designs with
         # different parameter ranges than the YAML defaults, e.g. gcd clock [0.3, 2.0]).
+        # In table mode, a config that is present in the replay table is valid by
+        # construction (it was a real logged build) — the tinymac YAML bounds do
+        # not apply to other designs' logged configs (gcd/asap7), so we must not
+        # reject it (audit EXP-F1: this is what blocked benchmarking on real data).
+        in_table = self._table is not None and _config_key(config) in self._table
         ok, reason = _validate_funnel(
             config, self._sim_params, self._proxy_params, self._constraints,
             active_space=self._active_space,
         )
-        if not ok:
+        if not ok and not in_table:
             raise ValueError(f"FunnelEnv.reset: invalid config: {reason}")
 
         # Initialise episode
@@ -575,6 +581,7 @@ class FunnelEnv:
         self._f1_obs = None
         self._f2_obs = None
         self._f3_obs = None
+        self._f3_status = None
         self._done = False
         self._episode_spent_s = 0.0
 
@@ -618,7 +625,9 @@ class FunnelEnv:
             # Jump to F3; shaping cost is F3 regardless of what was skipped
             reward = self._run_stage("F3")
             self._done = True
-            info.update({"fidelity": "F3", "f3_obs": self._f3_obs})
+            info.update({"fidelity": "F3", "f3_obs": self._f3_obs,
+                         "f3_status": self._f3_status,
+                         "table_miss": self._f3_status == "table_miss"})
             # Surface the effective recipe so callers can see plain→orfs_speed remapping
             if self._f3_obs:
                 info["effective_abc_recipe"] = self._f3_obs.get(
@@ -647,6 +656,9 @@ class FunnelEnv:
         reward = self._run_stage(next_fid)
         done = self._done
         info.update({"fidelity": next_fid})
+        if next_fid == "F3":
+            info["f3_status"] = self._f3_status
+            info["table_miss"] = self._f3_status == "table_miss"
         # Surface effective recipe when F3 completes via promote
         if next_fid == "F3" and self._f3_obs:
             info["effective_abc_recipe"] = self._f3_obs.get(
@@ -733,11 +745,15 @@ class FunnelEnv:
 
         if fidelity == "F3":
             # Terminal payoff: final composite reward using the ladder-consistent scorer
+            self._f3_status = status
             terminal_reward = self._terminal_reward(obs, status)
             reward += terminal_reward
-            # Update incumbent
-            if self._incumbent is None or terminal_reward > self._incumbent["reward"]:
-                self._incumbent = {"config": dict(self._config), "reward": terminal_reward}
+            # Update incumbent ONLY on a real result. A table_miss (missing-data,
+            # offline table has no F3 row) or a genuine failure must never become
+            # the incumbent or define the optimum (audit RL-F4 / EXP-F6).
+            if status in ("ok", "mock", "mock-proxy"):
+                if self._incumbent is None or terminal_reward > self._incumbent["reward"]:
+                    self._incumbent = {"config": dict(self._config), "reward": terminal_reward}
             self._done = True
 
             # Surrogate Δ shaping: Δ(best) after vs before observation
@@ -921,8 +937,14 @@ class FunnelEnv:
         """Compute the F3 terminal payoff using the ladder-consistent scorer.
 
         Successful F3 → compute_physical_reward (actual PPA metrics).
-        Non-ok status → monotone penalty from the ladder (-20 for full-flow-fail).
-        Table miss → -20 (same as full-flow-fail; we have no data).
+        Genuine failure (FAIL/TIMEOUT/PARSE_FAIL) → monotone ladder penalty
+            (-20 for full-flow-fail).
+        Table miss → neutral 0.0. A table_miss is a *missing-data* condition
+            (the offline table has no F3 row for this config), NOT a chip
+            failure. Scoring it as a failure (-20) poisons offline training and
+            benchmarks by teaching "unexplored = bad" and corrupts the optimum
+            scan (audit RL-F4 / EXP-F1 / EXP-F6). Callers detect table_miss via
+            info["table_miss"] and exclude the episode from incumbent/optimum.
         """
         penalties = self._reward_cfg.get("stage_penalty", {})
         full_fail_penalty = float(penalties.get("full", -20.0))
@@ -936,12 +958,12 @@ class FunnelEnv:
             scored = compute_physical_reward(obs, self._reward_cfg,
                                              cycles=sim_cycles)
             return float(scored.get("reward", full_fail_penalty))
-        else:
-            # FAIL / TIMEOUT / PARSE_FAIL / table_miss → ladder penalty
-            if status in ("TIMEOUT", "table_miss"):
-                # Charge less than a clean FAIL (some info gathered)
-                return full_fail_penalty
-            return full_fail_penalty
+
+        if status == "table_miss":
+            return 0.0   # missing data, not a failure — non-scoring episode
+
+        # Genuine failure (FAIL / TIMEOUT / PARSE_FAIL) → monotone ladder penalty
+        return full_fail_penalty
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 

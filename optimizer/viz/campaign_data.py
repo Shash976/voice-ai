@@ -39,10 +39,17 @@ def _find_latest_campaign_log() -> Path:
         )
         if logs:
             return logs[0]
-    return Path(__file__).resolve().parents[1] / "results_funnel_campaigns.jsonl"
+    # No flat fallback — require campaigns/ structure
+    raise FileNotFoundError(
+        "No results_funnel_campaigns.jsonl found under optimizer/campaigns/. "
+        "Run run_funnel_optimizer.py first."
+    )
 
 
-DEFAULT_LOG = _find_latest_campaign_log()
+try:
+    DEFAULT_LOG: Path | None = _find_latest_campaign_log()
+except FileNotFoundError:
+    DEFAULT_LOG = None
 
 _FIDELITY_ORDER = ["F0", "F1", "F2", "F3"]
 
@@ -98,13 +105,37 @@ def load_campaign_rows(
     return [r for r in rows if r.get("campaign_id") == sel]
 
 
+def obs_objective(row: dict) -> float | None:
+    """Fallback scalar for F3 rows where reward fields were not written.
+
+    Returns fmax_mhz from obs when the row is a successful F3 result and
+    f3_reward / episode_reward are both absent.  Used so campaigns logged by
+    run_funnel_optimizer.py (which writes raw obs but no scalar reward) still
+    produce meaningful history and param-scatter plots.
+    """
+    if row.get("fidelity") != "F3" or row.get("status") != "ok":
+        return None
+    obs = row.get("obs") or {}
+    fmax = obs.get("fmax_mhz")
+    if fmax is not None:
+        try:
+            return float(fmax)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
 def episode_value(row: dict) -> float | None:
-    """Maximize-objective for one episode: f3_reward if present, else episode_reward."""
+    """Maximize-objective for one episode.
+
+    Priority: f3_reward → episode_reward → obs_objective (fmax_mhz fallback
+    for campaigns that logged raw obs but no scalar reward field).
+    """
     v = row.get("f3_reward")
     if v is None:
         v = row.get("episode_reward")
     if v is None:
-        return None
+        return obs_objective(row)
     try:
         return float(v)
     except (TypeError, ValueError):

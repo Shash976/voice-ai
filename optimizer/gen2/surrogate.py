@@ -116,10 +116,16 @@ def _encode_config(x: dict) -> list[float]:
     plat_raw = x.get("platform") or "nangate45"
     plat_flag = 1.0 if str(plat_raw).lower() == "asap7" else 0.0
 
+    # util/density: floorplan/placement axes (frozen at 40/0.60 in the funnel
+    # space, but explicit features so matched builds don't alias — see EXP-F3).
+    util    = float(x.get("util", 40) or 40)
+    density = float(x.get("density", 0.60) or 0.60)
+
     # rtl_hash: treated as a categorical context feature (integer-encoded later
     # by the Surrogate which holds the hash→int mapping built during fit)
     # We return a placeholder 0.0 here; _build_feature_row replaces it.
-    return [math.log2(max(lanes, 1)), float(acc_w), clk, abc_flag, plat_flag, 0.0]
+    return [math.log2(max(lanes, 1)), float(acc_w), clk, abc_flag, plat_flag, 0.0,
+            util, density]
 
 
 def _encode_obs(obs: dict | None, means: dict) -> list[float]:
@@ -277,15 +283,19 @@ class Surrogate:
             if vals:
                 self._obs_means[c] = float(np.mean(vals))
 
-        # Build feature matrix X and target vectors Y
-        X_list, targets = [], {m: [] for m in METRICS}
+        # Build feature matrix X, target vectors Y, and per-row group keys.
+        # Group key = build identity (RTL axes + recipe + platform); used by
+        # GroupKFold so identical/near-identical configs never span train/val.
+        X_list, targets, group_keys = [], {m: [] for m in METRICS}, []
         for r in f3_rows:
             fv = self._build_feature_row(r, obs_index)
             X_list.append(fv)
+            group_keys.append(self._group_key(r))
             for m in METRICS:
                 targets[m].append(r.get(m))
 
         X = np.array(X_list, dtype=float)
+        groups_all = np.array(group_keys)
 
         # Per-metric: compute target stats then fit quantile models
         for m in METRICS:
@@ -293,6 +303,7 @@ class Surrogate:
             y_valid_idx = [i for i, v in enumerate(y_raw) if v is not None]
             y = np.array([float(y_raw[i]) for i in y_valid_idx])
             X_m = X[y_valid_idx]
+            groups_m = groups_all[y_valid_idx]
             n = len(y)
             diag[f"cv_n_{m}"] = n
 
@@ -323,8 +334,8 @@ class Surrogate:
                     gbt.fit(X_m, y)
                 self._models[m][q] = gbt
 
-            # 5-fold CV for Spearman rho
-            rho = self._cv_spearman(X_m, y, m, n_splits=5)
+            # Grouped 5-fold CV for Spearman rho (no config spans train/val)
+            rho = self._cv_spearman(X_m, y, m, groups=groups_m, n_splits=5)
             diag[f"cv_rho_{m}"] = round(rho, 4)
 
         self._fitted = True
@@ -496,7 +507,14 @@ class Surrogate:
         h = str(flat.get("rtl_hash", "unknown"))
         hash_cat = float(self._hash_map.get(h, len(self._hash_map)))  # unseen = n+1
 
-        cfg_feats = [math.log2(max(lanes, 1)), float(acc_w), clk, abc_flag, plat_flag, hash_cat]
+        # Floorplan/placement axes: kept as explicit features so matched builds
+        # that differ ONLY in util/density do not collapse to identical rows
+        # (the EXP-F3 leak). Default to the funnel-frozen values when absent.
+        util    = float(flat.get("util", 40) or 40)
+        density = float(flat.get("density", 0.60) or 0.60)
+
+        cfg_feats = [math.log2(max(lanes, 1)), float(acc_w), clk, abc_flag,
+                     plat_flag, hash_cat, util, density]
 
         # Resolve obs: priority = explicit obs_dict > obs from the row itself >
         # obs looked up from obs_index (training time join)
@@ -520,29 +538,57 @@ class Surrogate:
         obs_feats = _encode_obs(obs, self._obs_means)
         return cfg_feats + obs_feats
 
-    def _cv_spearman(
-        self, X: np.ndarray, y: np.ndarray, metric: str, n_splits: int = 5
-    ) -> float:
-        """Compute mean Spearman rho via stratified K-fold cross-validation.
+    @staticmethod
+    def _group_key(flat: dict) -> str:
+        """Build identity for grouped CV: RTL axes + recipe + platform.
 
-        Uses only q=0.50 (median) predictions for the rank correlation.
-        Falls back to leave-one-out if n < 2*n_splits.
+        Rows sharing this key (e.g. the same config rebuilt, or matched builds
+        differing only in floorplan knobs) are kept in the same CV fold so the
+        reported Spearman ρ is a genuine generalization estimate (EXP-F3 fix).
+        """
+        lanes = int(flat.get("lanes") or flat.get("mac_lanes") or 0)
+        acc   = int(flat.get("acc_w") or flat.get("accumulator_width") or 0)
+        clk   = round(float(flat.get("clk_ns") or flat.get("clock_period_ns") or 0.0), 4)
+        abc   = str(flat.get("abc") or flat.get("abc_recipe") or "")
+        plat  = str(flat.get("platform") or "nangate45")
+        return f"{lanes}|{acc}|{clk}|{abc}|{plat}"
+
+    def _cv_spearman(
+        self, X: np.ndarray, y: np.ndarray, metric: str,
+        groups: np.ndarray | None = None, n_splits: int = 5,
+    ) -> float:
+        """Mean Spearman ρ via *grouped* K-fold cross-validation.
+
+        Uses GroupKFold so that no build identity (see _group_key) appears in
+        both train and validation — this removes the matched-build leakage that
+        inflated the previous contiguous-slice estimate (EXP-F3). Uses only the
+        q=0.50 (median) model for the rank correlation. Returns NaN when there
+        are too few distinct groups to form ≥2 folds.
         """
         from scipy.stats import spearmanr
-        n = len(y)
-        if n < 2 * n_splits:
-            n_splits = max(2, n // 2)
+        from sklearn.model_selection import GroupKFold, KFold
 
-        indices = np.arange(n)
-        fold_size = n // n_splits
+        n = len(y)
+        if groups is None:
+            groups = np.arange(n)   # degrade to plain KFold-by-row
+        n_groups = len(set(groups.tolist()))
+        # Need at least 2 groups to cross-validate; cap splits by group count.
+        if n_groups < 2:
+            return float("nan")
+        n_splits = max(2, min(n_splits, n_groups))
+
+        if n_groups < n:
+            splitter = GroupKFold(n_splits=n_splits)
+            split_iter = splitter.split(X, y, groups)
+        else:
+            # All rows are unique groups → GroupKFold == KFold; shuffle for a
+            # less order-dependent estimate.
+            splitter = KFold(n_splits=n_splits, shuffle=True, random_state=self.seed)
+            split_iter = splitter.split(X)
+
         rhos = []
-        for i in range(n_splits):
-            val_idx = indices[i * fold_size:(i + 1) * fold_size]
-            if len(val_idx) == 0:
-                continue
-            train_idx = np.concatenate([indices[:i * fold_size],
-                                        indices[(i + 1) * fold_size:]])
-            if len(train_idx) < 3:
+        for train_idx, val_idx in split_iter:
+            if len(train_idx) < 3 or len(val_idx) < 2:
                 continue
             gbt = GradientBoostingRegressor(
                 loss="quantile", alpha=0.5,
@@ -553,8 +599,6 @@ class Surrogate:
                 warnings.simplefilter("ignore")
                 gbt.fit(X[train_idx], y[train_idx])
             y_pred = gbt.predict(X[val_idx])
-            if len(y_pred) < 2:
-                continue
             rho, _ = spearmanr(y[val_idx], y_pred)
             if not math.isnan(rho):
                 rhos.append(rho)
