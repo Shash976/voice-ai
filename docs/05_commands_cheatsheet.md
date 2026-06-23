@@ -85,135 +85,22 @@ times out at the 50M-cycle cap in pure SW — that's expected).
 
 ---
 
-## 4. Stage 5 — optimizer
+## 4. Stage 5 — Design-space optimization → [eda-rl](https://github.com/Shash976/eda-rl)
 
-There are **two tracks** (see `docs/04_optimizer.md`):
-
-- **`run_optimizer.py`** — the small 45-config space. Runs the Verilator sim for
-  cycles/accuracy and **analytic proxy formulas** for area/power/timing. **Never
-  runs Yosys or OpenROAD — no PDK, no GDS.** Fast.
-- **`run_cascade_optimizer.py`** — the big ~27 K space. A **multi-fidelity funnel**:
-  it simulates (and synth-screens) each config *first*, and only configs that pass
-  every cheap gate reach the expensive full RTL→GDS place-and-route. So a broken or
-  oversized config is thrown out in seconds instead of wasting a multi-minute PDK run.
-
-🪟 **Windows — offline, no sim needed** (quickest Stage-5 demo):
-```powershell
-python optimizer/benchmark_agents.py     # agent comparison + honest "no agent beats random" verdict
-python optimizer/test_reward_sanity.py   # 16/16 reward-function invariants
-```
-
-🐧 **WSL — live optimizer** (needs sim_picorv32 + firmware.bin built first):
-```bash
-python3 optimizer/run_optimizer.py --agent enumerate # exhaustive 45-config sweep — recommended
-python3 optimizer/run_optimizer.py                   # evo, 30 trials (default)
-python3 optimizer/run_optimizer.py --agent random    # random baseline
-python3 optimizer/run_optimizer.py --agent ucb       # UCB1 bandit
-python3 optimizer/run_optimizer.py --agent bayesian  # Optuna TPE (needs: pip install optuna)
-python3 optimizer/run_optimizer.py --agent evo --trials 50
-python3 optimizer/run_optimizer.py --resume          # continue previous run (appends to results.jsonl)
-python3 optimizer/run_optimizer.py --dry-run         # print configs, skip the sim
-python3 optimizer/runner.py 16 32                    # run one sim config directly (lanes acc_width)
-```
-
-**Cascade optimizer** — larger ~27 K-config space with the multi-fidelity funnel.
-Each config is pushed through gates cheapest → most expensive, and the **first
-failure short-circuits the rest** so the full PDK flow only runs on survivors:
-
-```
-validate  (µs)   legality + YAML constraints — no tools
-elaborate (~s)   Yosys reads the parameterised RTL
-sim       (~s)   Verilator: correctness + cycles   → reject if accuracy < 0.95 (e.g. acc_w<24)
-proxy     (s–m)  Yosys synth + OpenROAD STA        → reject if synth area > 80,000 µm²
-full      (min)  full RTL→GDS with the PDK         → real area / timing / power → reward
-```
+The optimizer is now a standalone tool in its own repo. Install it and point it at
+this accelerator's DesignSpec:
 
 ```bash
-python3 optimizer/run_cascade_optimizer.py --agent evo --trials 30        # full funnel (slow — reaches GDS)
-python3 optimizer/run_cascade_optimizer.py --max-stage proxy --trials 80  # stop at synth+STA (no P&R/GDS)
-python3 optimizer/run_cascade_optimizer.py --max-stage sim --trials 200   # stop after the sim gate (fastest screen)
-python3 optimizer/run_cascade_optimizer.py --platform asap7               # switch target PDK
-PHYSICAL_MOCK=1 python optimizer/test_cascade.py                          # offline self-test, 20 checks
+pip install -e <eda-rl checkout>
+EDA_RL_DESIGN_ROOT=$(pwd) \
+  eda-rl optimize --design <eda-rl>/eda_rl/designs/tinymac_accel.yaml \
+    --platform nangate45 --budget-hours 4
+eda-rl report  --campaign latest --open    # graphical HTML dashboard
+eda-rl collect --campaign latest --open    # best configs + their GDS
 ```
 
-The run prints **funnel attrition** (how many configs reached each gate), so you can
-see where bad configs die — e.g. `acc_width<24` is killed at the cheap `sim` gate and
-never wastes a place-and-route. `--max-stage` caps how deep the funnel goes (handy to
-screen many configs without paying for GDS).
-
-Live dashboard (separate terminal):
-```bash
-streamlit run optimizer/dashboard.py
-```
-
-**Second-generation funnel optimizer** (see `docs/08_funnel_optimizer.md`) —
-promotion decisions become trainable actions, a surrogate model sits between the
-fidelities, and the space is either the reduced 4-axis tinymac space or a
-design-agnostic space built from a YAML spec + tiered ORFS knob registry.
-
-> All commands below work via the shims at `optimizer/`; the real code lives
-> under `optimizer/gen2/` and `optimizer/common/`.
-
-```bash
-# Offline F0–F2 table (tinymac, default):
-python3 optimizer/build_table.py --subset strategic    # 84 configs, ~1.2 h (resumable)
-python3 optimizer/build_table.py                       # full 594-config grid, ~7 h
-python3 optimizer/build_table.py --dry-run             # show plan + cost estimate first
-
-# Table for a different design (gcd, tier-2 ORFS knobs active):
-python3 optimizer/build_table.py --design gcd --max-tier 2
-
-# Fit + cross-validate the surrogate on all built data:
-python3 optimizer/fit_surrogate.py                     # writes optimizer/surrogate_n45.joblib
-
-# Benchmark promotion policies on the table simulator:
-python3 optimizer/benchmark_funnel.py --seeds 20       # random vs fixed-gate vs LinUCB
-python3 optimizer/benchmark_funnel.py --candidates tpe         # Optuna TPE candidate ordering
-python3 optimizer/benchmark_funnel.py --candidates surrogate_ucb  # surrogate UCB ordering
-python3 optimizer/benchmark_funnel.py --candidates shuffled    # default (seeded shuffle)
-
-# Live campaign driver — tinymac, 4-axis tier-1 space, TPE candidates:
-python3 optimizer/run_funnel_optimizer.py \
-    --design tinymac_accel --platform nangate45 \
-    --budget-hours 4 --max-tier 1 --sampler tpe --promotion fixed
-
-# Live campaign — gcd, tier-2 knob space:
-python3 optimizer/run_funnel_optimizer.py \
-    --design gcd --platform nangate45 \
-    --budget-hours 4 --max-tier 2 --sampler tpe --promotion fixed
-
-# Table-mode campaign (replay without real ORFS calls):
-python3 optimizer/run_funnel_optimizer.py \
-    --design tinymac_accel --budget-hours 4 \
-    --sampler surrogate_ucb --promotion linucb \
-    --table optimizer/results_funnel.jsonl
-
-# Self-tests (no real tools needed):
-PHYSICAL_MOCK=1 python3 optimizer/funnel.py            # FunnelEnv self-test
-PHYSICAL_MOCK=1 python3 optimizer/run_funnel_optimizer.py \
-    --design tinymac_accel --budget-hours 0.01 \
-    --sampler tpe --promotion fixed \
-    --table optimizer/results_funnel.jsonl
-```
-
-Campaign logs are written to
-`optimizer/campaigns/<design>/<platform>/results_funnel_campaigns.jsonl`
-(printed as `Results →` at run end). Use `--out /path.jsonl` to override.
-
-**Visualize a campaign** (`pip install optuna-dashboard plotly` once):
-```bash
-LOG=optimizer/campaigns/tinymac_accel/nangate45/results_funnel_campaigns.jsonl
-
-# Static self-contained HTML report (reward vs params, history, funnel, importances):
-python3 optimizer/viz/report.py                        # auto-finds latest log
-python3 optimizer/viz/report.py --log $LOG --open      # specific log, open in browser
-python3 optimizer/viz/report.py --log $LOG --campaign all  # pool all campaigns in file
-
-# Live Optuna dashboard (auto-refreshes while the optimizer runs):
-python3 optimizer/viz/dashboard.py --live --log $LOG   # http://127.0.0.1:8080/
-python3 optimizer/viz/dashboard.py                     # one-shot snapshot, latest campaign
-python3 optimizer/viz/dashboard.py --no-serve --log $LOG  # rebuild JournalStorage only
-```
+See the [eda-rl README](https://github.com/Shash976/eda-rl) for the full command set
+and options.
 
 ---
 

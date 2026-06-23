@@ -205,42 +205,17 @@ while area grows with lanes — a clean latency-vs-area Pareto.
 
 ### Closing the loop — the optimizer drives the flow (Stage 5 ↔ 6)
 
-The same agents that searched the *simulated* design space (random / evo / ucb /
-bayesian) can now drive the **real** ORFS flow and score measured metrics:
+The ORFS make flow described here is also driven *programmatically* by an
+optimizer that proposes a chip config, lets the tools build it, feeds the real
+measured metrics (area / Fmax / power / timing — never the requested clock) back
+as a reward, and picks the next config. Each non-cached trial is a full
+place-and-route (minutes), with content-hashed variant names so RTL edits
+invalidate stale builds, and `PARSE_FAIL` / `TIMEOUT` surfaced as penalties.
 
-```bash
-# on the VM (real OpenROAD):
-python3 optimizer/run_physical_optimizer.py --agent evo --trials 12
-# offline self-test (no OpenROAD, synthetic-but-plausible metrics):
-PHYSICAL_MOCK=1 python3 optimizer/run_physical_optimizer.py --agent random --trials 6
-```
-
-| Module | Role |
-|--------|------|
-| `optimizer/physical_runner.py` | runs one config through ORFS (reuses `sweep.sh`'s mechanism), parses area/WNS/Fmax/power from the real reports. `PHYSICAL_MOCK=1` for offline tests |
-| `optimizer/physical_reward.py` | reward over **measured** metrics only: speedup uses the real achieved Fmax (missing Fmax ⇒ zero speedup, never the requested clock), real area/power, real timing_met. Same weights as the sim reward |
-| `optimizer/physical_env.py` | `PhysicalOptEnv(OptEnv)` — swaps the evaluation, reuses every agent; forwards *all* config axes (lanes/acc_w/clk/util/density/abc recipe) |
-| `optimizer/run_physical_optimizer.py` | CLI; logs to `results_physical.jsonl` |
-
-Robustness properties of the runner (each one earned by a bug):
-
-- **Variant naming**: `L4_A24_c5_r<8-hex>` — parameters plus a content hash of the
-  RTL sources, so editing the RTL invalidates every cached build instead of
-  silently returning stale metrics. Clock formatting (`{:.4g}`) keeps 1.25 and
-  1.2 distinct.
-- **Failure visibility**: a report that parses to nothing is `PARSE_FAIL`, a
-  timed-out flow is `TIMEOUT` (its whole process group is killed — no orphaned
-  yosys/openroad), and both are logged and scored with penalties; only `ok`
-  results are cached.
-- **Units**: all stored times are ns regardless of platform (see the asap7 note
-  above).
-
-Each non-cached trial is a full place-and-route (minutes), so keep trial counts
-modest; distinct configs and already-built variants are cached/reused. This is
-the plan's Stage-5↔6 loop: the agent proposes a chip config, the tools build it,
-the real metrics feed the reward, the agent picks the next one. The
-second-generation funnel ([doc 08](08_funnel_optimizer.md)) builds on exactly
-this plumbing.
+That optimizer — the multi-fidelity funnel that builds on exactly this plumbing —
+now lives in the standalone **[eda-rl](https://github.com/Shash976/eda-rl)** repo.
+See its README for the input → report → best-GDS pipeline; point it at this
+checkout with `EDA_RL_DESIGN_ROOT=$(pwd)`.
 
 > This code was independently reviewed for hallucinated APIs and wrong ORFS
 > assumptions before landing; the report parsers were checked against real VM

@@ -44,9 +44,9 @@ Platforms configured: **nangate45** (45 nm, primary), **asap7** (7 nm-class
 target — note its SDC time unit is *picoseconds*; the optimizer handles the
 conversion, see `optimizer/physical_runner.py`), **sky130hd** (130 nm bring-up).
 
-The Stage-5 optimizer drives this flow programmatically
-(`optimizer/run_physical_optimizer.py`, and the multi-fidelity funnel in
-`optimizer/funnel.py` — see [`docs/08_funnel_optimizer.md`](../../docs/08_funnel_optimizer.md)).
+The Stage-5 optimizer drives this flow programmatically — it now lives in the
+standalone [eda-rl](https://github.com/Shash976/eda-rl) repo (a design-agnostic
+multi-fidelity funnel optimizer that calls this same ORFS make flow).
 
 > **Historical note:** a bazel-orfs route was tried first and abandoned — its
 > gallery workspace needs PyPI access that times out on the available networks.

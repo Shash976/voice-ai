@@ -40,7 +40,7 @@ The solution: a tiny always-on chip that listens continuously and only wakes up 
 Stage 1–2  TinyVAD: train, quantize to int8, export to C         ✅ complete
 Stage 3    PicoRV32 software baseline in Verilator simulation     ✅ complete
 Stage 4    Behavioral int8 AI accelerator                         ✅ complete
-Stage 5    Design-space optimization (agents + reward + benchmark) ✅ complete
+Stage 5    Design-space optimization → moved to the eda-rl repo     ↗ external
 Stage 6    RTL synthesis → place-and-route → GDS (real chip)      🚧 GDS produced
 ```
 
@@ -52,17 +52,12 @@ bit-exact-verified against the reference inference, then taken all the way to
 509 MHz. A parameter sweep (`physical/orfs/make/sweep.sh`) compares LANES
 configs. See [`docs/06_rtl_to_gds.md`](docs/06_rtl_to_gds.md).
 
-**Stage 5 status:** beyond the original grid search, the optimizer is now a
-**multi-fidelity funnel** with design-agnostic inputs: any chip design can be
-described in a ~10-line YAML spec (`optimizer/designs/`) and evaluated through
-the same fidelity ladder (analytic → behavioral sim → synthesis proxy → full
-place-and-route), proven on a second real design (gcd). A 24-knob, 4-tier ORFS
-knob registry (`optimizer/common/knobs.py`) extends the search space beyond RTL
-parameters, with `--max-tier N` controlling breadth. Candidate generation uses
-Optuna TPE (or surrogate UCB, or random), feeding back only real F3 rewards so
-the model learns the true objective. The promote/kill decisions are actions of a
-trainable policy — the project's first genuinely sequential decision problem. See
-[`docs/08_funnel_optimizer.md`](docs/08_funnel_optimizer.md).
+**Stage 5 status:** the design-space optimizer has been extracted into its own
+standalone, reusable tool — **[eda-rl](https://github.com/Shash976/eda-rl)** — a
+multi-fidelity funnel optimizer that drives the ORFS flow for *any* design
+described by a ~10-line YAML spec. To optimize this accelerator with it, install
+eda-rl and point it at a tinymac DesignSpec with `EDA_RL_DESIGN_ROOT` set to this
+checkout (see that repo's README for the full input → report → best-GDS pipeline).
 
 ---
 
@@ -432,7 +427,7 @@ correct=64/64 avg_cycles=61399
 ### Results
 
 All cycle figures are **per inference**. Speedup is vs. the Stage-3 SW baseline
-(11,196,638 cycles/inference), measured empirically (`optimizer/measure_real.py`).
+(11,196,638 cycles/inference), measured empirically from the Verilator sweep.
 
 | | Stage 3 — software only | Stage 4 — accel, 8 lanes | Stage 4 — accel, 16 lanes |
 |---|---|---|---|
@@ -448,31 +443,33 @@ the accelerator deliberately reproduces hardware-accurate overflow, dropping to
 
 ---
 
-## Stage 5 (✅ complete): Design-Space Optimization
+## Stage 5: Design-Space Optimization → [eda-rl](https://github.com/Shash976/eda-rl)
 
-> **Built — two generations.** The first generation
-> ([docs/04_optimizer.md](docs/04_optimizer.md)) is design-space *exploration*
-> (single-step black-box search), not RL: the 45-config sim grid is fully
-> enumerable (`--agent enumerate` gives the true optimum `{lanes:4, acc:24,
-> clk:5}`), and the honest benchmark finding is that no learning agent beats
-> random there. The second generation
-> ([docs/08_funnel_optimizer.md](docs/08_funnel_optimizer.md)) restructures the
-> search as a multi-fidelity funnel — cheap analytic checks, then behavioral
-> simulation, then a synthesis proxy, then full place-and-route — with a learned
-> surrogate model and trainable promote/kill decisions, evaluated against real
-> OpenROAD builds on nangate45 and asap7. The original plan below is kept for
-> context.
+The design-space optimizer that searches hardware configurations for this
+accelerator has been split out into its own standalone, reusable repository:
+**[eda-rl](https://github.com/Shash976/eda-rl)**.
 
-The behavioral model makes it cheap to try different hardware configurations. `MAC_LANES` is the most obvious knob: 1 lane = sequential, 16 lanes = 16 MACs per cycle. But there are others: accumulator width (int16 vs int32), dataflow strategy (weight-stationary vs output-stationary), buffer sizes.
+It is a multi-fidelity *funnel* optimizer over the OpenROAD flow — cheap analytic
+checks, then a synthesis proxy, then full place-and-route — with a learned
+surrogate and trainable promote/kill decisions, and it is design-agnostic: any
+chip becomes an input via a ~10-line `DesignSpec` YAML. Given a design it returns
+an HTML analysis dashboard, a best-configs comparison page, and the RTL-to-GDS for
+the winning configurations.
 
-The plan: a Python script sweeps these parameters, re-runs the Verilator simulation for each configuration, and records cycle count as a proxy for performance. Area (gate count) can be estimated proportionally to lane count. The result is a Pareto frontier of latency vs. area, which feeds directly into what RTL to actually write for Stage 6.
+To optimize **this** accelerator with it:
 
-Candidate parameters to sweep (from the project plan):
-```yaml
-mac_lanes:           [1, 2, 4, 8, 16]
-accumulator_width:   [16, 24, 32]
-dataflow:            [output_stationary, weight_stationary]
+```bash
+pip install -e <eda-rl checkout>
+EDA_RL_DESIGN_ROOT=$(pwd) \
+  eda-rl optimize --design <eda-rl>/eda_rl/designs/tinymac_accel.yaml \
+    --platform nangate45 --budget-hours 4
+eda-rl report  --campaign latest --open      # graphical dashboard
+eda-rl collect --campaign latest --open      # best configs + their GDS
 ```
+
+The relevant knobs (MAC lanes, accumulator width, clock target, ABC recipe, and
+ORFS placement/CTS/route knobs) are declared in the tinymac `DesignSpec`; see the
+eda-rl README for the full pipeline and options.
 
 ---
 
@@ -549,12 +546,12 @@ train_tiny_vad.py
                                            → Verilator simulation
                                                → CSV results + cycle counts
                                                    │
-                                              Stage 5: sweep configs
-                                                   → best config
-                                                       │
                                                   Stage 6: write RTL
                                                    → ORFS / ASAP7
                                                        → GDS
+                                                           │
+                                              Stage 5 (eda-rl repo): search configs
+                                               → best optimized GDS
 ```
 
 ---
@@ -591,18 +588,8 @@ rtl/
 sim/verilator/
   sim_main.cpp                        Verilator C++ testbench: RAM, UART, accelerator emulation
 
-optimizer/                            Stage 5: both optimizer generations
-  gen1/                               single-step black-box DSE: 45-config sim track,
-                                      fixed-gate cascade funnel, physical track, agents
-  gen2/                               multi-fidelity funnel: FunnelEnv, surrogate,
-                                      promotion policies, Optuna candidates, table builder,
-                                      benchmark, campaign driver
-  common/                             shared plumbing: physical_runner, rewards, recipe,
-                                      constants (single source of truth), designs.py,
-                                      knobs.py (24-knob 4-tier ORFS registry)
-  designs/                            per-design YAML specs (tinymac_accel, gcd)
-  run_*.py / build_table.py / etc.    shims — forward to gen1/ or gen2/; all commands
-                                      work unchanged from the optimizer/ root
+                                      (Stage 5 design-space optimization lives in the
+                                       separate eda-rl repo: github.com/Shash976/eda-rl)
 
 physical/orfs/                        Stage 6: OpenROAD-flow-scripts integration
   make/                               per-platform config + run.sh / sweep.sh

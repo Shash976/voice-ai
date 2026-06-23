@@ -44,8 +44,7 @@ Each stage feeds the next. The doc map below tells you which file to read for ea
 | 1–2 | The TinyVAD model + int8 quantization + the C inference engine | [01_model_and_quantization.md](01_model_and_quantization.md) |
 | 3 | PicoRV32 CPU, bare-metal firmware, the Verilator simulator | [02_firmware_and_simulation.md](02_firmware_and_simulation.md) |
 | 4 | The memory-mapped MAC accelerator + its firmware driver | [03_accelerator.md](03_accelerator.md) |
-| 5 | The Python design-space optimizer (agents + reward + benchmark) | [04_optimizer.md](04_optimizer.md) |
-| 5 (gen 2) | The multi-fidelity funnel optimizer: surrogate model + trainable promote/kill policy | [08_funnel_optimizer.md](08_funnel_optimizer.md) (rationale: [07](07_rl_pipeline_design.md)) |
+| 5 | Design-space optimization — now its own repo | [eda-rl](https://github.com/Shash976/eda-rl): a design-agnostic multi-fidelity funnel optimizer over the ORFS flow |
 | 6 | Synthesizable RTL, Verilator correctness gate, ORFS → GDS, physical metrics | [06_rtl_to_gds.md](06_rtl_to_gds.md) |
 | — | Every command in one place | [05_commands_cheatsheet.md](05_commands_cheatsheet.md) |
 

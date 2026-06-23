@@ -218,4 +218,6 @@ confirmed it by measuring 576 cycles (FC0) vs the 512-cycle idealized estimate.
 - `mac_lanes` scales modeled latency; `acc_width` models real overflow (test all 64
   vectors).
 
-Next: [04_optimizer.md](04_optimizer.md) — automatically searching the design knobs.
+Next: [06_rtl_to_gds.md](06_rtl_to_gds.md) — turning the RTL into a real chip layout.
+Automatically searching the design knobs is handled by the separate
+[eda-rl](https://github.com/Shash976/eda-rl) optimizer.
