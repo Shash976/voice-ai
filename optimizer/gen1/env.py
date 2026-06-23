@@ -20,7 +20,8 @@ import yaml
 from gen1.reward import compute_proxies, compute_reward, real_speedup
 from gen1.runner import SW_BASELINE_CYCLES, run_sim
 
-RESULTS_FILE = Path(__file__).resolve().parent.parent / "results.jsonl"
+_OPT_ROOT = Path(__file__).resolve().parent.parent
+RESULTS_FILE = _OPT_ROOT / "results" / "gen1" / "results.jsonl"
 
 
 def _load_yaml(path: str | Path) -> dict:
@@ -204,6 +205,7 @@ class OptEnv:
         return list(self._history)
 
     def _log(self, record: dict) -> None:
+        RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(RESULTS_FILE, "a") as f:
             f.write(json.dumps(record) + "\n")
 
