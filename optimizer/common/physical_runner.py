@@ -69,7 +69,8 @@ from common.recipe import (
 )
 
 _REPO    = Path(__file__).resolve().parent.parent.parent
-MAKE_DIR = _REPO / "physical" / "orfs" / "make"
+MAKE_DIR = _REPO / "physical" / "orfs" / "make"   # source configs + variant .mk/.sdc
+RUN_DIR  = _REPO / "physical" / "orfs" / "runs"   # ORFS WORK_HOME: logs/objects/results/proxy/elaborate
 RTL_DIR  = _REPO / "rtl" / "accel"
 DESIGN   = "tinymac_accel"
 RTL_FILES = ("tinymac_accel.v", "int8_mac_array.v", "requantize.v")
@@ -582,14 +583,14 @@ def run_physical(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangate
     gen_cfg = _stage_inputs(platform, var, lanes, acc_w, clk_ns, util, density,
                             abc_recipe=resolved_recipe,
                             design=eff_design, knob_values=knob_values)
-    gds = MAKE_DIR / "results" / platform / actual_design_name / var / "6_final.gds"
+    gds = RUN_DIR / "results" / platform / actual_design_name / var / "6_final.gds"
 
     flow_status = "ok"
     if not gds.exists():
         make_cmd = (
             f"source '{env_sh}' && "
             f"make --file='{ORFS_DIR}/flow/Makefile' "
-            f"FLOW_HOME='{ORFS_DIR}/flow' WORK_HOME='{MAKE_DIR}' "
+            f"FLOW_HOME='{ORFS_DIR}/flow' WORK_HOME='{RUN_DIR}' "
             f"DESIGN_CONFIG='{gen_cfg}' FLOW_VARIANT='{var}'"
         )
         # V10: use Popen + communicate(timeout) + start_new_session so we can
@@ -608,7 +609,7 @@ def run_physical(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangate
             except (ProcessLookupError, PermissionError):
                 pass
             proc.wait()
-            log_path = MAKE_DIR / f"opt_{var}.log"
+            log_path = RUN_DIR / f"opt_{var}.log"
             log_path.write_text(f"[TIMEOUT after {ORFS_TIMEOUT}s]\n")
             # V10: return TIMEOUT status (never raise); do NOT cache so the config
             # can be retried and the agent can update on it.
@@ -619,13 +620,13 @@ def run_physical(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangate
                     "timing_met": None, "gds": None, "report": str(log_path)}
 
         # Persist the flow output so a failure is debuggable.
-        (MAKE_DIR / f"opt_{var}.log").write_text(
+        (RUN_DIR / f"opt_{var}.log").write_text(
             (stdout or "") + "\n--- stderr ---\n" + (stderr or "")
         )
         if proc.returncode != 0:
             flow_status = "FAIL"
 
-    metrics = _parse_metrics(MAKE_DIR, platform, var, clk_ns,
+    metrics = _parse_metrics(RUN_DIR, platform, var, clk_ns,
                              design_name=actual_design_name)
     # V2: _parse_metrics now sets status="PARSE_FAIL" if essential metrics are
     # missing; honour that over the flow_status, and also catch the case where
@@ -674,7 +675,7 @@ def run_elaborate(lanes: int, acc_w: int, platform: str = "nangate45") -> dict:
         )
 
     rtl = " ".join(str(RTL_DIR / f) for f in RTL_FILES)
-    work = MAKE_DIR / "elaborate" / variant_name(lanes, acc_w, 1.0)
+    work = RUN_DIR / "elaborate" / variant_name(lanes, acc_w, 1.0)
     work.mkdir(parents=True, exist_ok=True)
     ys = work / "elaborate.ys"
     ys.write_text("\n".join([
@@ -855,7 +856,7 @@ def run_synth_sta(lanes: int, acc_w: int, clk_ns: float, platform: str = "nangat
                             design=eff_design, knob_values=knob_values)
     sdc = gen_cfg.parent / f"constraint_{var}.sdc"
 
-    work = MAKE_DIR / "proxy" / var
+    work = RUN_DIR / "proxy" / var
     work.mkdir(parents=True, exist_ok=True)
     netlist = work / "netlist.v"
     synth_ys = work / "synth.ys"
