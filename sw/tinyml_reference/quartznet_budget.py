@@ -9,7 +9,7 @@ blocks = [  # (name, C_out, K, R, residual, separable)
  *[(f"B5.{i}",512,75,5,True,True) for i in range(3)],
  ("C2", 512, 87, 1, False, True),
  ("C3", 1024, 1, 1, False, False),
- ("C4(dec)", 28, 1, 1, False, False),
+ ("C4(dec)", 29, 1, 1, False, False),  # 28 labels + CTC blank
 ]
 cin = 64; tot_p = tot_dw = tot_pw = tot_res = 0
 print(f"{'block':>9} {'Cin':>5} {'Cout':>5} {'K':>3} {'R':>2} {'dw_MAC':>10} {'pw_MAC':>12} {'res_MAC':>9} {'total':>12}")
@@ -35,7 +35,7 @@ for L,f in [(4,269e6),(16,269e6),(64,269e6),(256,269e6),(64,500e6),(256,500e6)]:
 # activation working set
 print("\nactivation buffer per chunk of T frames (int8, 512ch): T=100 -> %.0f KB/tensor" % (512*100/1024))
 
-def build(S, R, cs, ks, cenc=1024, nmels=64, vocab=28):
+def build(S, R, cs, ks, cenc=1024, nmels=64, vocab=29):
     bl=[("C1",cs[0],ks[0],1,False,True)]
     for i,(c,k) in enumerate(zip(cs,ks)):
         bl += [(f"B{i}.{j}",c,k,R,True,True) for j in range(S)]

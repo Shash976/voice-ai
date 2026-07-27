@@ -68,3 +68,6 @@ review.zip
 
 # ─── Claude Code tooling ──────────────────────────────────────────────────────
 .claude/worktrees/
+
+# Stage 7: generated QuartzNet weight/descriptor blobs (~20 MB)
+build/
