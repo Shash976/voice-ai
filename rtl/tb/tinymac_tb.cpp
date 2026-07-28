@@ -20,6 +20,7 @@
 #include <cstring>
 #include <vector>
 #include <random>
+#include <type_traits>
 
 #include "Vtinymac_accel.h"
 #include "verilated.h"
@@ -87,19 +88,39 @@ static int8_t golden_channel(int m, int K,
 
 /* ── Operand packing for the LANES-wide chunk ports ──────────────────────── */
 
-/* Pack up to 8 lanes into a 64-bit word (Verilator scalar port type for
- * LANES<=8). LANES>8 needs the wide (VlWide) port API — not supported here. */
-static uint64_t pack_chunk(const int8_t *base, int idx0, int K, int total)
+/* Verilator picks the port's C++ type from its width: <=32b is uint32_t,
+ * 33..64b is uint64_t, and anything wider becomes VlWide<N> — a uint32_t
+ * array that scalar assignment cannot reach. The chunk ports are LANES*8
+ * bits, so LANES>8 lands in the wide case. These overloads cover all three
+ * so the tb tracks LANES up to the QuartzNet design point (32). */
+template <typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
+static void store_bytes(T &p, const uint8_t *b, int n)
 {
-    static_assert(TB_LANES <= 8, "tb supports LANES<=8 (64-bit chunk port)");
-    uint64_t w = 0;
+    uint64_t w = 0;   /* n <= 8 whenever the port is scalar, so 64b is enough */
+    for (int lane = 0; lane < n; lane++) w |= (uint64_t)b[lane] << (8 * lane);
+    p = (T)w;
+}
+
+template <std::size_t N>
+static void store_bytes(VlWide<N> &p, const uint8_t *b, int n)
+{
+    for (std::size_t i = 0; i < N; i++) p[i] = 0;
+    for (int lane = 0; lane < n; lane++)
+        p[lane >> 2] |= (uint32_t)b[lane] << (8 * (lane & 3));
+}
+
+/* Pack LANES int8 operands into the chunk port, zero-filling the tail lanes
+ * of a ragged final chunk (the RTL masks them via lane_en, so the value only
+ * has to be deterministic). */
+template <typename T>
+static void pack_chunk(T &port, const int8_t *base, int idx0, int K, int total)
+{
+    uint8_t b[TB_LANES];
     for (int lane = 0; lane < TB_LANES; lane++) {
         int k = idx0 + lane;
-        uint8_t b = 0;
-        if (k < K && (idx0 + lane) < total) b = (uint8_t)base[k];
-        w |= (uint64_t)b << (8 * lane);
+        b[lane] = (k < K && k < total) ? (uint8_t)base[k] : 0;
     }
-    return w;
+    store_bytes(port, b, TB_LANES);
 }
 
 /* ── Test harness ────────────────────────────────────────────────────────── */
@@ -149,8 +170,8 @@ static int run_case(const Case &c, const char *name)
         int m  = dut->o_m;
         int kb = dut->o_k_base;
         if (m >= 0 && m < c.M) {
-            dut->i_in_chunk = pack_chunk(c.in.data(), kb, c.K, c.K);
-            dut->i_wt_chunk = pack_chunk(c.W.data() + (size_t)m * c.K, kb, c.K, c.K);
+            pack_chunk(dut->i_in_chunk, c.in.data(), kb, c.K, c.K);
+            pack_chunk(dut->i_wt_chunk, c.W.data() + (size_t)m * c.K, kb, c.K, c.K);
             dut->i_bias   = (uint32_t)c.bias[m];
             dut->i_qmult  = (uint32_t)c.qmult[m];
             dut->i_rshift = (uint32_t)c.rshift[m];
@@ -176,8 +197,22 @@ static int run_case(const Case &c, const char *name)
         if (started) { dut->start = 0; started = false; }
     }
 
+    /* Cycle-model check.  The behavioral model in sim/verilator/sim_main.cpp
+     * predicts accelerator latency as
+     *     n_outputs * (ceil(reduction / LANES) + ACCEL_CH_OVERHEAD) + 1
+     * with ACCEL_CH_OVERHEAD = 2 (bias load + requantize launch) and a single
+     * trailing +1 for the requantize pipeline drain (S_DRAIN), which is paid
+     * once per operation rather than once per channel.  Asserting it here keeps
+     * the RTL and the behavioral sim from silently drifting apart. */
+    int chunks     = (c.K + TB_LANES - 1) / TB_LANES;
+    int expect_cyc = c.M * (chunks + 2) + 1;
+    int cyc_bad    = (last_cyc != expect_cyc);
+    if (cyc_bad)
+        fprintf(stderr, "  [%s] CYCLE MODEL: dut=%d expected=%d (M=%d chunks=%d)\n",
+                name, last_cyc, expect_cyc, c.M, chunks);
+
     /* compare against golden */
-    int mismatches = 0;
+    int mismatches = cyc_bad;
     for (int m = 0; m < c.M; m++) {
         int8_t gold = golden_channel(m, c.K, c.in, c.W, c.bias, c.qmult, c.rshift,
                                      c.in_zp, c.out_zp, c.relu);

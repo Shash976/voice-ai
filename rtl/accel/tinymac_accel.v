@@ -73,8 +73,9 @@ module tinymac_accel #(
     localparam [2:0] S_IDLE    = 3'd0,
                      S_INIT_CH = 3'd1,
                      S_MAC     = 3'd2,
-                     S_REQ     = 3'd3,
-                     S_DONE    = 3'd4;
+                     S_REQ     = 3'd3,   /* launch the requantize pipeline */
+                     S_DRAIN   = 3'd4,   /* wait for the last result to pop out */
+                     S_DONE    = 3'd5;
 
     reg [2:0]  state;
     reg [15:0] m_cnt;       /* current output channel */
@@ -136,15 +137,31 @@ module tinymac_accel #(
         else                       acc_sat = acc_sum;
     end
 
-    /* ── Combinational requantize datapath ──────────────────────────────── */
+    /* ── Pipelined requantize datapath (2 stages) ───────────────────────────
+     * Launched combinationally from S_REQ, so `acc` (final, for channel m_cnt)
+     * and the environment-supplied i_qmult / i_rshift (addressed by o_m =
+     * m_cnt, which only advances at the end of S_REQ) are the correct
+     * channel's operands during that cycle.  The result pops out one cycle
+     * later, by which time the FSM has already moved on to the next channel —
+     * so the extra cycle costs throughput ONCE PER OPERATION (the S_DRAIN
+     * cycle), not once per output channel.  Per-channel latency stays
+     * ceil(K/LANES) + 2, i.e. sim_main.cpp's ACCEL_CH_OVERHEAD is still 2. */
+    wire rq_launch = (state == S_REQ);
+    wire rq_valid;
     wire signed [7:0] out_q;
+    reg  [15:0] rq_m_q;          /* channel index travelling with the pipeline */
+
     requantize u_rq (
-        .acc    (acc),
-        .q_mult (i_qmult),
-        .shift  (i_rshift),
-        .out_zp (out_zp_reg),
-        .relu   (relu_reg),
-        .out_q  (out_q)
+        .clk      (clk),
+        .rst_n    (rst_n),
+        .in_valid (rq_launch),
+        .acc      (acc),
+        .q_mult   (i_qmult),
+        .shift    (i_rshift),
+        .out_zp   (out_zp_reg),
+        .relu     (relu_reg),
+        .out_valid(rq_valid),
+        .out_q    (out_q)
     );
 
     /* ── Sequencer ──────────────────────────────────────────────────────── */
@@ -157,11 +174,19 @@ module tinymac_accel #(
             o_out_valid <= 1'b0;
             o_out_m     <= 16'd0;
             o_out_data  <= 8'sd0;
+            rq_m_q      <= 16'd0;
             done        <= 1'b0;
             cyc_cnt     <= 32'd0;
             o_last_cycles <= 32'd0;
         end else begin
-            o_out_valid <= 1'b0;
+            /* Output register is driven by the requantize pipeline, not by the
+             * state machine: whenever stage 2 signals a valid result, latch it
+             * together with the channel index that travelled with it. */
+            o_out_valid <= rq_valid;
+            if (rq_valid) begin
+                o_out_data <= out_q;
+                o_out_m    <= rq_m_q;
+            end
             done        <= 1'b0;
             if (state != S_IDLE)
                 cyc_cnt <= cyc_cnt + 32'd1;
@@ -197,15 +222,26 @@ module tinymac_accel #(
             end
             /* ---------------------------------------------------------- */
             S_REQ: begin
-                o_out_valid <= 1'b1;
-                o_out_m     <= m_cnt;
-                o_out_data  <= out_q;
+                /* Launch only (rq_launch = state == S_REQ). The result is
+                 * emitted one cycle later by the rq_valid path above, in
+                 * parallel with the next channel's accumulation. */
+                rq_m_q <= m_cnt;
                 if ((m_cnt + 16'd1) >= M_reg)
-                    state <= S_DONE;
+                    state <= S_DRAIN;
                 else begin
                     m_cnt <= m_cnt + 16'd1;
                     state <= S_INIT_CH;
                 end
+            end
+            /* ---------------------------------------------------------- */
+            S_DRAIN: begin
+                /* Hold off `done` until the final requantize result has been
+                 * registered, so consumers never see done before the last
+                 * o_out_valid strobe.  Exactly one cycle at pipeline depth 1;
+                 * written against rq_valid so it stays correct if the
+                 * requantize pipeline is ever deepened. */
+                if (rq_valid)
+                    state <= S_DONE;
             end
             /* ---------------------------------------------------------- */
             S_DONE: begin

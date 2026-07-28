@@ -222,7 +222,15 @@ static void accel_execute(uint32_t cmd)
      * overhead and understated hardware by ~12.5% (FC0: 512 vs measured 576). */
     const uint64_t ACCEL_CH_OVERHEAD = 2;   /* bias load + requantize, per output */
     uint64_t chunks  = (reduction + (uint64_t)mac_lanes - 1) / (uint64_t)mac_lanes;
-    uint64_t latency = n_outputs * (chunks + ACCEL_CH_OVERHEAD);
+    /* +1: the requantize datapath is pipelined over 2 cycles in the RTL, so the
+     * last output channel needs one extra drain cycle (FSM state S_DRAIN) before
+     * `done`.  It is paid ONCE PER OPERATION, not per channel — the FSM starts
+     * the next channel while a result is still in flight, which is why
+     * ACCEL_CH_OVERHEAD stays 2.  Verified against the RTL by rtl/tb (which
+     * asserts this exact formula); NOT verified end-to-end here — no RISC-V
+     * toolchain was available on the machine that made this change, so the full
+     * PicoRV32 sim could not be rebuilt.  Please confirm on the next full run. */
+    uint64_t latency = n_outputs * (chunks + ACCEL_CH_OVERHEAD) + 1;
     ar.last_cyc   = (uint32_t)latency;
     accel_done_at = cycle_count + latency;
 }
