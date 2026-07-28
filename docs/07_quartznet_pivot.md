@@ -241,3 +241,74 @@ cd sim/verilator && make run
   behavioral. Neither solves the 18.85 MB problem — you inherit it either way.
 - **Retraining or NAS.** Hardware-first, per scope.
 - **QuartzNet on the PicoRV32 itself** — ~20 MMAC/s is ~47,000× short. CPU is control.
+
+---
+
+# Progress log
+
+## Requantize pipelining — measured (nangate45, 2.0 ns SDC, LANES=4 ACC_W=24)
+
+Both variants run on the **same machine** so the comparison is valid. The
+pristine WNS reproduces the previously-documented −1.72 ns exactly, which also
+confirms the flow is reproducible across machines.
+
+| | WNS | period_min | Fmax | cell area | sequential |
+|---|---|---|---|---|---|
+| pristine (combinational) | −1.72 ns | 3.72 ns | 268.8 MHz | 16,723 µm² | 1,165 µm² |
+| **pipelined (2-stage)** | **−0.41 ns** | **2.41 ns** | **414.9 MHz** | 17,271 µm² | 1,468 µm² |
+| delta | | | **1.54×** | **+3.3%** | +303 µm² |
+
+1.54× lands in the 1.2–1.8× range predicted from the structure, below the ~2×
+the earlier docs assumed. TNS also improved, −25.86 → −15.25.
+
+### The critical path moved — and this changes the design space
+
+| variant | worst setup path | slack |
+|---|---|---|
+| pristine | `i_qmult[15]` → `o_out_data[4]` (the Q31 multiply) | −1.72 |
+| pipelined | `i_in_chunk[25]` → `acc[2]` (**the MAC accumulate path**) | −0.41 |
+| pipelined (2nd) | `u_rq.prod_q[36]` → `o_out_data[4]` (requantize stage 2) | −0.37 |
+
+The split is well balanced: requantize stage 2 (−0.37) and the MAC path (−0.41)
+are within 0.04 ns, which is about as good as a 2-way split gets. Pushing Fmax
+further now needs the *MAC* path shortened (adder-tree pipelining), not more
+requantize work.
+
+**Consequence for the sweep:** the old critical path was requantize, which is
+**independent of LANES** — that is exactly why the Stage 5 sweep showed area
+rising with LANES while Fmax stayed flat. The new critical path runs through
+the adder tree and **is LANES-dependent**, so widening the array now costs
+Fmax. The LANES sweep must be re-run; its previous "Fmax is flat" conclusion no
+longer holds and the Pareto has real tension in it for the first time.
+
+## Testbench now reaches the design point
+
+`rtl/tb` carried `static_assert(TB_LANES <= 8)` because Verilator represents the
+LANES*8-bit chunk ports as `VlWide` above 64 bits. Fixed with width-agnostic
+`store_bytes()` overloads. Verified **12/12 configs, 0 mismatches**, LANES ∈
+{1,2,4,8,16,32} × ACC_W ∈ {24,32}. LANES 16 and 32 were previously untestable,
+and 32 is the QuartzNet design point.
+
+## Software foundation
+
+187 descriptors; 12,072 B table; 18,847,040 B weight blob; 837,240 B qparam
+blob. **187/187 descriptors reproduce from the emitted blobs** on seeded random
+weights at the real tensor shapes.
+
+Peak |acc| measured at 56,098,816 — 2.6% of int32, but *above* the naive
+c_in·255·127 = 33,162,240 bound, because bias folding and the ADD op's
+pre-scaling both inflate it. Worth knowing before trusting a headroom argument.
+
+**Bandwidth model corrected again:** the first revision omitted the depthwise
+halo re-read. For a 10 s utterance the real figure is **67.76 MB (6.78 MB/s)**,
+not 55.78 MB. The halo re-read costs more than DW→PW fusion saves *and* is the
+cheaper of the two to implement, so it should be done first. Larger T_TILE
+amortises it: T_TILE=32 is 1.60× the halo-retained floor, T_TILE=128 is 1.16×.
+
+## Environment notes
+- No sudo on this machine. Python work runs in the `voiceai` conda env
+  (`conda activate voiceai`; numpy, onnx, onnxruntime).
+- **No RISC-V toolchain**, and it cannot be apt-installed. Blocks the
+  full-system PicoRV32 sim at Stage D only. The `sim_main.cpp` latency change
+  (+1 drain cycle per op) is therefore **unverified end-to-end** — flagged in a
+  comment at the change site.
