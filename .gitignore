@@ -43,6 +43,11 @@ physical/orfs/make/src/
 # The hand-written base files (config.mk / constraint.sdc, no underscore) are NOT matched.
 physical/orfs/make/**/config_*.mk
 physical/orfs/make/**/constraint_*.sdc
+# ...but the sram_spike macro-orientation variants are hand-written source, not
+# generated, and the pattern above was silently swallowing them.
+!physical/orfs/make/nangate45/sram_spike/config_mirror.mk
+!physical/orfs/make/nangate45/sram_spike/config_outward.mk
+!physical/orfs/make/nangate45/sram_spike/config_r0grid.mk
 
 # ─── Optimizer runtime outputs ────────────────────────────────────────────────
 # Matches results.jsonl, results_physical.jsonl, and any future variants
