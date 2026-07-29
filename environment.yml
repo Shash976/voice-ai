@@ -1,0 +1,20 @@
+# Conda environment for the Python side of this project (model export,
+# descriptor generation, NumPy golden reference).
+#
+#   conda env create -f environment.yml
+#   conda activate voiceai
+#
+# Hardware tooling (Verilator, ORFS, RISC-V GCC) is NOT managed here — see
+# docs/07b_machine_setup.md.
+name: voiceai
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy>=2.0
+  - pip
+  - pip:
+      # Needed only for Stage A (real QuartzNet weights). The topology,
+      # descriptor and golden-reference modules run on numpy alone.
+      - onnx>=1.22
+      - onnxruntime>=1.28
