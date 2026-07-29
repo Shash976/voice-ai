@@ -1,0 +1,53 @@
+
+20. Printing statistics.
+
+=== sram_spike ===
+
+        +----------------------------Count including submodules.
+        |        +-------------------Area including submodules.
+        |        |        +----------Local count, excluding submodules.
+        |        |        |        +-Local area, excluding submodules.
+        |        |        |        | 
+      642        -      642        - wires
+      704        -      704        - wire bits
+      246        -      246        - public wires
+      308        -      308        - public wire bits
+        7        -        7        - ports
+       69        -       69        - port bits
+        -        -        -        - memories
+        -        -        -        - memory bits
+        -        -        -        - processes
+      400 6.82E+04      400 6.82E+04 cells
+       34   36.176       34   36.176   AND2_X1
+        2     2.66        2     2.66   AND3_X1
+        1    1.596        1    1.596   AND3_X2
+        1    1.596        1    1.596   AND4_X1
+        2    6.916        2    6.916   AND4_X4
+       13   13.832       13   13.832   AOI21_X1
+        1    1.596        1    1.596   AOI221_X1
+        1    2.926        1    2.926   AOI221_X2
+       14   11.172       14   11.172   BUF_X1
+        2    2.128        2    2.128   BUF_X2
+        1    1.862        1    1.862   BUF_X4
+       78  352.716       78  352.716   DFF_X1
+        2     5.32        2     5.32   HA_X1
+        8    4.256        8    4.256   INV_X1
+        1    0.532        1    0.532   LOGIC1_X1
+        5     9.31        5     9.31   MUX2_X1
+       11    8.778       11    8.778   NAND2_X1
+        5     5.32        5     5.32   NAND3_X1
+        4     5.32        4     5.32   NAND4_X1
+       39   31.122       39   31.122   NOR2_X1
+        2    2.128        2    2.128   NOR3_X1
+        4    4.256        4    4.256   OAI21_X1
+        1     1.33        1     1.33   OAI22_X1
+        2    2.128        2    2.128   OR2_X1
+        1     1.33        1     1.33   OR3_X1
+      160   255.36      160   255.36   XNOR2_X1
+        1    1.596        1    1.596   XOR2_X1
+        2 3.28E+04        2 3.28E+04   fakeram45_1024x32
+        2 3.46E+04        2 3.46E+04   fakeram45_512x64
+
+   Chip area for module '\sram_spike': 68188.302000
+     of which used for sequential elements: 352.716000 (0.52%)
+
