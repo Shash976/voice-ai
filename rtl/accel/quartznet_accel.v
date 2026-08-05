@@ -73,6 +73,40 @@
  * never parses buffer records.  IN_CBASE is staged already reduced modulo the
  * pitch (the C's `in_off % pitch`), so there is no divider in the datapath.
  *
+ * ── Increment 2: autonomous table walking ───────────────────────────────────
+ *
+ * CTRL bit1 (RUN_TABLE) starts an autonomous walk of the in-ROM descriptor
+ * table at TABLE_BASE: fetch the 64B header, fetch the n_buffers x 8B
+ * buffer-record table, fetch descriptor 0 (64B / 16 words), populate
+ * registers 3-28 from it — deriving the five buffer-resolved fields (BASE x3,
+ * PITCH x3, the four blob offsets) on-chip instead of via software — then
+ * execute it through the SAME per-op states increment 1 already verified,
+ * and repeat for descriptors 1..n_desc-1.  Nothing about int8_mac_array.v,
+ * requantize.v/requantize_add.v, or addr_gen.v's per-op execution changes;
+ * this increment only adds the fetch/dispatch loop around it.
+ *
+ * STATUS bit2 (TABLE_DONE) fires once, after the last descriptor, instead of
+ * per-descriptor DONE (bit1), which still fires every descriptor, unchanged,
+ * for observability. New registers:
+ *
+ *  idx  name          acc  notes
+ *  29   TABLE_BASE     RW  QSPI byte address of the table image
+ *  30   W_BLOB_BASE    RW  added to each descriptor's blob-relative W_OFF
+ *  31   QP_BLOB_BASE   RW  added to each descriptor's blob-relative
+ *                          BIAS_OFF/QMULT_OFF/RSHIFT_OFF
+ *  32   DESC_IDX       R   current descriptor index (debug only)
+ *
+ * CTRL bit1 RUN_TABLE (self-clearing, ignored while busy — "busy" is now
+ * `state != S_IDLE`, not just the address generator's own busy flag, since a
+ * table walk is busy between descriptors too, while the next one is being
+ * fetched).  STATUS bit3 is a sticky err_bad_in_off flag (read only, cleared
+ * automatically at the next RUN_TABLE trigger): IN_CBASE still has no divider
+ * (same reason as increment 1), and autonomous mode additionally REQUIRES
+ * in_off == 0 for every descriptor it fetches — true of every table
+ * quartznet_descriptors.py emits today (in_off is hardcoded 0, see its
+ * pack_record()) — so a fetched descriptor with a nonzero in_off latches the
+ * flag rather than silently computing a wrong address.
+ *
  * Parameters:
  *   LANES — parallel int8 MAC lanes; 32 is the QuartzNet design point.
  *   ACC_W — accumulator width.  MUST be 32 for QuartzNet: ACC_W=24 saturates
@@ -134,6 +168,7 @@ module quartznet_accel #(
 );
 
     localparam [1:0] OP_DW = 2'd0, OP_PW = 2'd1, OP_ADD = 2'd2, OP_REQ = 2'd3;
+    localparam integer N_BUF_MAX = 8;   /* real tables use 5 (QN_N_BUFFERS) */
 
     /* ── Register file ──────────────────────────────────────────────────── */
     reg [31:0] r_op, r_flags, r_c_in, r_c_out, r_k, r_stride, r_dilation, r_pad;
@@ -148,73 +183,43 @@ module quartznet_accel #(
     reg        done_sticky;
     reg [31:0] cyc_cnt, last_cycles;
 
-    wire ag_busy;
-    assign busy = ag_busy;
+    /* ── Increment 2: table-walker registers ──────────────────────────────
+     * TABLE_BASE/W_BLOB_BASE/QP_BLOB_BASE are software-staged once per table
+     * walk (idx 29-31); everything else here is internal FSM state, not
+     * software-visible except DESC_IDX (idx 32, read-only debug). */
+    reg [31:0] r_table_base, r_w_blob_base, r_qp_blob_base;
+    reg        run_table_pulse;
+    reg        table_mode;
+    reg        table_done_sticky;
+    reg        err_bad_in_off;
+    reg        tbl_start_pulse;      /* internal addr_gen kick, one per desc */
+    reg [31:0] desc_idx;
+    reg [31:0] hdr_n_desc, hdr_desc_off, hdr_n_buffers;
+    reg [3:0]  word_i;               /* 0..15: header/descriptor word fetch */
+    reg [3:0]  buf_i;                /* 0..N_BUF_MAX-1: buffer-record fetch */
+    reg        buftbl_phase;         /* 0 = channels word, 1 = rate word    */
+    reg [31:0] buf_cum;              /* running arena-offset accumulator    */
+    reg [31:0] buf_ch_r   [0:N_BUF_MAX-1];   /* re-read per descriptor (PITCH) */
+    reg [31:0] buf_off_r  [0:N_BUF_MAX-1];   /* re-read per descriptor (BASE)  */
+    /* buf_rate is NOT kept resident: it only feeds the one-time buf_cum
+     * running-offset update below, straight from q_rsp_word. */
+    reg [31:0] desc_word_r[0:15];    /* the 16 words of the fetched record  */
 
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            start_pulse  <= 1'b0;
-            done_sticky  <= 1'b0;
-            r_op         <= 32'd0; r_flags     <= 32'd0;
-            r_c_in       <= 32'd0; r_c_out     <= 32'd0;
-            r_k          <= 32'd1; r_stride    <= 32'd1;
-            r_dilation   <= 32'd1; r_pad       <= 32'd0;
-            r_t_out      <= 32'd0; r_t_tile    <= 32'd32;
-            r_dw_ch_tile <= 32'd64;
-            r_in_zp      <= 32'd0; r_out_zp    <= 32'd0; r_res_zp <= 32'd0;
-            r_in_base    <= 32'd0; r_in_pitch  <= 32'd1; r_in_cbase  <= 32'd0;
-            r_out_base   <= 32'd0; r_out_pitch <= 32'd1; r_out_cbase <= 32'd0;
-            r_res_base   <= 32'd0; r_res_pitch <= 32'd1;
-            r_w_off      <= 32'd0; r_bias_off  <= 32'd0;
-            r_qmult_off  <= 32'd0; r_rshift_off<= 32'd0;
-        end else begin
-            start_pulse <= 1'b0;
-            if (mmio_we) begin
-                case (mmio_addr)
-                8'd0:  if (mmio_wdata[0] && !ag_busy) start_pulse <= 1'b1;
-                8'd1:  if (mmio_wdata[1]) done_sticky <= 1'b0;   /* W1C */
-                8'd3:  r_op         <= mmio_wdata;
-                8'd4:  r_flags      <= mmio_wdata;
-                8'd5:  r_c_in       <= mmio_wdata;
-                8'd6:  r_c_out      <= mmio_wdata;
-                8'd7:  r_k          <= mmio_wdata;
-                8'd8:  r_stride     <= mmio_wdata;
-                8'd9:  r_dilation   <= mmio_wdata;
-                8'd10: r_pad        <= mmio_wdata;
-                8'd11: r_t_out      <= mmio_wdata;
-                8'd12: r_t_tile     <= mmio_wdata;
-                8'd13: r_dw_ch_tile <= mmio_wdata;
-                8'd14: r_in_zp      <= mmio_wdata;
-                8'd15: r_out_zp     <= mmio_wdata;
-                8'd16: r_res_zp     <= mmio_wdata;
-                8'd17: r_in_base    <= mmio_wdata;
-                8'd18: r_in_pitch   <= mmio_wdata;
-                8'd19: r_in_cbase   <= mmio_wdata;
-                8'd20: r_out_base   <= mmio_wdata;
-                8'd21: r_out_pitch  <= mmio_wdata;
-                8'd22: r_out_cbase  <= mmio_wdata;
-                8'd23: r_res_base   <= mmio_wdata;
-                8'd24: r_res_pitch  <= mmio_wdata;
-                8'd25: r_w_off      <= mmio_wdata;
-                8'd26: r_bias_off   <= mmio_wdata;
-                8'd27: r_qmult_off  <= mmio_wdata;
-                8'd28: r_rshift_off <= mmio_wdata;
-                default: ;
-                endcase
-            end
-            if (done_pulse) done_sticky <= 1'b1;
-        end
-    end
+    wire ag_busy;       /* addr_gen's own busy (this descriptor's walk)     */
+    wire accel_busy;    /* whole-sequencer busy (spans an entire table walk) */
+    assign busy = accel_busy;
 
     always @* begin
         case (mmio_addr)
-        8'd1:  mmio_rdata = {30'd0, done_sticky, ag_busy};
+        8'd1:  mmio_rdata = {28'd0, err_bad_in_off, table_done_sticky,
+                              done_sticky, accel_busy};
         8'd2:  mmio_rdata = last_cycles;
         8'd3:  mmio_rdata = r_op;
         8'd4:  mmio_rdata = r_flags;
         8'd5:  mmio_rdata = r_c_in;
         8'd6:  mmio_rdata = r_c_out;
         8'd7:  mmio_rdata = r_k;
+        8'd32: mmio_rdata = desc_idx;
         default: mmio_rdata = 32'd0;
         endcase
     end
@@ -242,9 +247,15 @@ module quartznet_accel #(
     wire [15:0] ag_t0, ag_t1, ag_c0, ag_c1, ag_in0, ag_in1, ag_new0, ag_new1;
     wire        ag_first_tile, ag_last_tile, ag_tile_start;
 
+    /* addr_gen's start is kicked either by the legacy CTRL.START pulse or, in
+     * table-walk mode, by tbl_start_pulse once per fetched descriptor -- the
+     * two are mutually exclusive in time (single-descriptor mode never
+     * enters the table-fetch states that produce tbl_start_pulse). */
+    wire ag_start = start_pulse | tbl_start_pulse;
+
     addr_gen #(.LANES(LANES)) u_ag (
         .clk (clk), .rst_n (rst_n),
-        .start (start_pulse),
+        .start (ag_start),
         .chunk_done (ag_chunk_done),
         .elem_done  (ag_elem_done),
         .cfg_op         (op),
@@ -420,16 +431,36 @@ module quartznet_accel #(
         S_RQ_W     = 5'd14,
         S_ST       = 5'd15,  /* store the output byte                     */
         S_ST_W     = 5'd16,
-        S_FIN      = 5'd17;
+        S_FIN      = 5'd17,
+        /* ── Increment 2: table-walk fetch states ─────────────────────── */
+        S_HDR      = 5'd18,  /* fetch the 64B/16-word table header        */
+        S_HDR_W    = 5'd19,
+        S_BUFTBL   = 5'd20,  /* fetch n_buffers x 8B buffer records       */
+        S_BUFTBL_W = 5'd21,
+        S_DESC     = 5'd22,  /* fetch descriptor desc_idx (64B/16 words)  */
+        S_DESC_W   = 5'd23,
+        S_POPULATE = 5'd24,  /* decode desc_word_r[] into regs 3-28       */
+        S_KICK     = 5'd25;  /* one-cycle handoff to addr_gen (see below) */
 
     reg [4:0] state;
     reg [2:0] qp_idx;        /* which qparam word is in flight */
     reg       in_got, wt_got;
+
+    /* "Busy" for MMIO gating covers the whole table walk, not just whatever
+     * addr_gen happens to be doing right now -- ag_busy alone drops between
+     * descriptors while the next one is being fetched from ROM. */
+    assign accel_busy = (state != S_IDLE);
     reg signed [7:0] out_byte;
 
     assign ag_chunk_done = (state == S_ACC);
     assign ag_elem_done  = (state == S_ST_W) && p_rsp_valid;
     assign done_pulse    = (state == S_FIN);
+
+    /* Fires once, on the S_FIN that completes the LAST descriptor of a table
+     * walk -- table_done_sticky (owned by the MMIO always block above, same
+     * pattern as done_sticky/done_pulse) latches it. */
+    wire table_done_pulse = (state == S_FIN) && table_mode
+                          && ((desc_idx + 32'd1) >= hdr_n_desc);
 
     /* qparam word address for the current fetch index. */
     reg [31:0] qp_addr;
@@ -450,6 +481,26 @@ module quartznet_accel #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
+            /* ── Register file + status (formerly a separate always block;
+             * merged here because S_POPULATE below writes the same r_*
+             * config registers software's mmio_we path writes, and Verilog
+             * disallows two always blocks driving one reg) ──────────────── */
+            start_pulse  <= 1'b0;
+            done_sticky  <= 1'b0;
+            r_op         <= 32'd0; r_flags     <= 32'd0;
+            r_c_in       <= 32'd0; r_c_out     <= 32'd0;
+            r_k          <= 32'd1; r_stride    <= 32'd1;
+            r_dilation   <= 32'd1; r_pad       <= 32'd0;
+            r_t_out      <= 32'd0; r_t_tile    <= 32'd32;
+            r_dw_ch_tile <= 32'd64;
+            r_in_zp      <= 32'd0; r_out_zp    <= 32'd0; r_res_zp <= 32'd0;
+            r_in_base    <= 32'd0; r_in_pitch  <= 32'd1; r_in_cbase  <= 32'd0;
+            r_out_base   <= 32'd0; r_out_pitch <= 32'd1; r_out_cbase <= 32'd0;
+            r_res_base   <= 32'd0; r_res_pitch <= 32'd1;
+            r_w_off      <= 32'd0; r_bias_off  <= 32'd0;
+            r_qmult_off  <= 32'd0; r_rshift_off<= 32'd0;
+            r_table_base <= 32'd0; r_w_blob_base <= 32'd0; r_qp_blob_base <= 32'd0;
+            run_table_pulse <= 1'b0; table_done_sticky <= 1'b0;
             state       <= S_IDLE;
             q_req_valid <= 1'b0; q_req_word <= 1'b0;
             q_req_addr  <= 32'd0; q_req_stride <= 32'd1;
@@ -472,9 +523,71 @@ module quartznet_accel #(
             relu_q  <= 1'b0;
             out_byte <= 8'sd0;
             cyc_cnt <= 32'd0; last_cycles <= 32'd0;
+            /* ── Increment 2: table-walk FSM state (owned by this block) ── */
+            table_mode      <= 1'b0;
+            err_bad_in_off  <= 1'b0;
+            tbl_start_pulse <= 1'b0;
+            desc_idx        <= 32'd0;
+            hdr_n_desc      <= 32'd0; hdr_desc_off <= 32'd0; hdr_n_buffers <= 32'd0;
+            word_i          <= 4'd0;  buf_i        <= 4'd0;  buftbl_phase  <= 1'b0;
+            buf_cum         <= 32'd0;
         end else begin
-            rq_launch  <= 1'b0;
-            rqa_launch <= 1'b0;
+            start_pulse     <= 1'b0;
+            run_table_pulse <= 1'b0;
+            rq_launch       <= 1'b0;
+            rqa_launch      <= 1'b0;
+            tbl_start_pulse <= 1'b0;
+
+            /* Software register writes.  Textually before the case(state)
+             * block below, so if S_POPULATE and a same-cycle software write
+             * ever targeted the same register (not a real scenario: software
+             * does not poke config registers mid-table-walk), S_POPULATE's
+             * NBA -- later in program order -- would be the one that takes
+             * effect. */
+            if (mmio_we) begin
+                case (mmio_addr)
+                8'd0:  begin
+                    if (mmio_wdata[0] && !accel_busy) start_pulse     <= 1'b1;
+                    if (mmio_wdata[1] && !accel_busy) run_table_pulse <= 1'b1;
+                end
+                8'd1:  begin
+                    if (mmio_wdata[1]) done_sticky       <= 1'b0;   /* W1C */
+                    if (mmio_wdata[2]) table_done_sticky <= 1'b0;   /* W1C */
+                end
+                8'd3:  r_op         <= mmio_wdata;
+                8'd4:  r_flags      <= mmio_wdata;
+                8'd5:  r_c_in       <= mmio_wdata;
+                8'd6:  r_c_out      <= mmio_wdata;
+                8'd7:  r_k          <= mmio_wdata;
+                8'd8:  r_stride     <= mmio_wdata;
+                8'd9:  r_dilation   <= mmio_wdata;
+                8'd10: r_pad        <= mmio_wdata;
+                8'd11: r_t_out      <= mmio_wdata;
+                8'd12: r_t_tile     <= mmio_wdata;
+                8'd13: r_dw_ch_tile <= mmio_wdata;
+                8'd14: r_in_zp      <= mmio_wdata;
+                8'd15: r_out_zp     <= mmio_wdata;
+                8'd16: r_res_zp     <= mmio_wdata;
+                8'd17: r_in_base    <= mmio_wdata;
+                8'd18: r_in_pitch   <= mmio_wdata;
+                8'd19: r_in_cbase   <= mmio_wdata;
+                8'd20: r_out_base   <= mmio_wdata;
+                8'd21: r_out_pitch  <= mmio_wdata;
+                8'd22: r_out_cbase  <= mmio_wdata;
+                8'd23: r_res_base   <= mmio_wdata;
+                8'd24: r_res_pitch  <= mmio_wdata;
+                8'd25: r_w_off      <= mmio_wdata;
+                8'd26: r_bias_off   <= mmio_wdata;
+                8'd27: r_qmult_off  <= mmio_wdata;
+                8'd28: r_rshift_off <= mmio_wdata;
+                8'd29: r_table_base   <= mmio_wdata;
+                8'd30: r_w_blob_base  <= mmio_wdata;
+                8'd31: r_qp_blob_base <= mmio_wdata;
+                default: ;
+                endcase
+            end
+            if (done_pulse)       done_sticky       <= 1'b1;
+            if (table_done_pulse) table_done_sticky <= 1'b1;
 
             /* Deassert a request once it has been accepted. */
             if (q_req_valid && q_req_ready) q_req_valid <= 1'b0;
@@ -497,8 +610,168 @@ module quartznet_accel #(
                     qp_idx   <= (op == OP_ADD) ? 3'd3 : 3'd0;
                     qp_last_add <= 1'b0;
                     state    <= (op == OP_ADD) ? S_ADDQ : S_ELEM;
+                end else if (run_table_pulse) begin
+                    desc_idx       <= 32'd0;
+                    word_i         <= 4'd0;
+                    table_mode     <= 1'b1;
+                    err_bad_in_off <= 1'b0;
+                    cyc_cnt        <= 32'd0;
+                    state          <= S_HDR;
                 end
             end
+            /* ---- Increment 2: table header (16 words) ------------------ */
+            S_HDR: begin
+                if (!q_req_valid) begin
+                    q_req_valid  <= 1'b1;
+                    q_req_word   <= 1'b1;
+                    q_req_addr   <= r_table_base + {26'd0, word_i, 2'd0};
+                    q_req_stride <= 32'd1;
+                    q_req_mask   <= {LANES{1'b0}};
+                    state        <= S_HDR_W;
+                end
+            end
+            S_HDR_W: begin
+                if (q_rsp_valid) begin
+                    case (word_i)
+                    4'd2:    hdr_n_desc    <= q_rsp_word;   /* header word 2  */
+                    4'd10:   r_t_tile      <= q_rsp_word;   /* header word 10 */
+                    4'd12:   r_dw_ch_tile  <= q_rsp_word;   /* header word 12 */
+                    4'd14:   hdr_n_buffers <= q_rsp_word;   /* header word 14 */
+                    4'd15:   hdr_desc_off  <= q_rsp_word;   /* header word 15 */
+                    default: ;
+                    endcase
+                    if (word_i == 4'd15) begin
+                        buf_i        <= 4'd0;
+                        buftbl_phase <= 1'b0;
+                        buf_cum      <= 32'd0;
+                        state        <= S_BUFTBL;
+                    end else begin
+                        word_i <= word_i + 4'd1;
+                        state  <= S_HDR;
+                    end
+                end
+            end
+            /* ---- Increment 2: buffer-record table (n_buffers x 8B) ------ */
+            S_BUFTBL: begin
+                if (!q_req_valid) begin
+                    q_req_valid  <= 1'b1;
+                    q_req_word   <= 1'b1;
+                    q_req_addr   <= r_table_base + 32'd64
+                                  + {25'd0, buf_i[2:0], 3'd0}
+                                  + (buftbl_phase ? 32'd4 : 32'd0);
+                    q_req_stride <= 32'd1;
+                    q_req_mask   <= {LANES{1'b0}};
+                    state        <= S_BUFTBL_W;
+                end
+            end
+            S_BUFTBL_W: begin
+                if (q_rsp_valid) begin
+                    if (!buftbl_phase) begin
+                        buf_ch_r[buf_i[2:0]] <= q_rsp_word;
+                        buftbl_phase         <= 1'b1;
+                        state                <= S_BUFTBL;
+                    end else begin
+                        buf_off_r[buf_i[2:0]] <= buf_cum;
+                        buf_cum <= buf_cum
+                                 + buf_ch_r[buf_i[2:0]] * q_rsp_word * r_t_out;
+                        buftbl_phase <= 1'b0;
+                        if ({28'd0, buf_i} == hdr_n_buffers - 32'd1) begin
+                            word_i <= 4'd0;
+                            state  <= S_DESC;
+                        end else begin
+                            buf_i <= buf_i + 4'd1;
+                            state <= S_BUFTBL;
+                        end
+                    end
+                end
+            end
+            /* ---- Increment 2: one descriptor (16 words) ----------------- */
+            S_DESC: begin
+                if (!q_req_valid) begin
+                    q_req_valid  <= 1'b1;
+                    q_req_word   <= 1'b1;
+                    q_req_addr   <= r_table_base + hdr_desc_off + (desc_idx << 6)
+                                  + {26'd0, word_i, 2'd0};
+                    q_req_stride <= 32'd1;
+                    q_req_mask   <= {LANES{1'b0}};
+                    state        <= S_DESC_W;
+                end
+            end
+            S_DESC_W: begin
+                if (q_rsp_valid) begin
+                    desc_word_r[word_i] <= q_rsp_word;
+                    if (word_i == 4'd15) begin
+                        state <= S_POPULATE;
+                    end else begin
+                        word_i <= word_i + 4'd1;
+                        state  <= S_DESC;
+                    end
+                end
+            end
+            /* ---- Increment 2: decode the fetched descriptor into regs
+             * 3-28, deriving BASE/PITCH from the buffer table and the blob
+             * offsets from the *_BLOB_BASE registers -- exactly what
+             * software (rtl/tb/quartznet_tb.cpp) does today -- then dispatch
+             * into the SAME S_ADDQ/S_ELEM path single-descriptor mode uses.
+             * Decisions here read desc_word_r directly rather than the
+             * (not-yet-updated) r_op/op wire, since those NBAs land on this
+             * same clock edge and are not visible until next cycle. -------- */
+            S_POPULATE: begin
+                r_op         <= {24'd0, desc_word_r[0][7:0]};
+                r_flags      <= {24'd0, desc_word_r[0][15:8]};
+                r_c_in       <= {16'd0, desc_word_r[1][15:0]};
+                r_c_out      <= {16'd0, desc_word_r[1][31:16]};
+                r_k          <= {16'd0, desc_word_r[2][15:0]};
+                r_stride     <= {24'd0, desc_word_r[2][23:16]};
+                r_dilation   <= {24'd0, desc_word_r[2][31:24]};
+                r_pad        <= {16'd0, desc_word_r[3][15:0]};
+                r_in_zp      <= {{24{desc_word_r[5][7]}},  desc_word_r[5][7:0]};
+                r_out_zp     <= {{24{desc_word_r[5][15]}}, desc_word_r[5][15:8]};
+                r_res_zp     <= {{24{desc_word_r[5][23]}}, desc_word_r[5][23:16]};
+                r_out_cbase  <= {16'd0, desc_word_r[7][15:0]};
+                r_w_off      <= r_w_blob_base  + desc_word_r[9];
+                r_bias_off   <= r_qp_blob_base + desc_word_r[10];
+                r_qmult_off  <= r_qp_blob_base + desc_word_r[11];
+                r_rshift_off <= r_qp_blob_base + desc_word_r[12];
+
+                /* in_buf/out_buf/res_buf are full bytes in the descriptor
+                 * (room for growth) but only their low 3 bits index the
+                 * N_BUF_MAX=8 on-chip buffer table; real tables never use
+                 * more than 5 (QN_N_BUFFERS). */
+                r_in_base    <= buf_off_r[desc_word_r[0][18:16]];
+                r_in_pitch   <= {16'd0, buf_ch_r[desc_word_r[0][18:16]][15:0]};
+                r_out_base   <= buf_off_r[desc_word_r[0][26:24]];
+                r_out_pitch  <= {16'd0, buf_ch_r[desc_word_r[0][26:24]][15:0]};
+                r_res_base   <= buf_off_r[desc_word_r[3][18:16]];
+                r_res_pitch  <= {16'd0, buf_ch_r[desc_word_r[3][18:16]][15:0]};
+
+                /* Autonomous mode requires in_off == 0 (see the module
+                 * header) -- no divider, so IN_CBASE is staged directly. */
+                r_in_cbase <= {16'd0, desc_word_r[6][15:0]};
+                if (desc_word_r[6] != 32'd0) err_bad_in_off <= 1'b1;
+
+                in_zp_q  <= {desc_word_r[5][7], desc_word_r[5][7:0]};
+                res_zp_q <= {desc_word_r[5][23], desc_word_r[5][23:16]};
+                out_zp_q <= {{24{desc_word_r[5][15]}}, desc_word_r[5][15:8]};
+                relu_q   <= desc_word_r[0][8];
+                cyc_cnt  <= 32'd0;
+
+                qp_idx      <= (desc_word_r[0][1:0] == OP_ADD) ? 3'd3 : 3'd0;
+                qp_last_add <= 1'b0;
+                tbl_start_pulse <= 1'b1;
+                state <= S_KICK;
+            end
+            /* ---- Increment 2: addr_gen's own start must be high the SAME
+             * cycle it is read, and it must latch cfg_* on the SAME edge
+             * quartznet_accel's own state leaves S_ELEM's predecessor --
+             * exactly the alignment start_pulse/S_IDLE already have (start
+             * is set one state before the state that depends on it, not in
+             * the same state that consumes it). tbl_start_pulse was set by
+             * S_POPULATE's NBA (previous cycle) so it is already stable and
+             * visible to addr_gen at this same edge; op/r_op are equally
+             * already updated (same NBA batch), so reading `op` here (not
+             * desc_word_r) is safe, unlike inside S_POPULATE itself. ------ */
+            S_KICK: state <= (op == OP_ADD) ? S_ADDQ : S_ELEM;
             /* ---- ADD: six per-tensor qparams, fetched once ------------- */
             S_ADDQ: begin
                 if (!q_req_valid) begin
@@ -709,7 +982,24 @@ module quartznet_accel #(
             /* ---- Finish ------------------------------------------------ */
             S_FIN: begin
                 last_cycles <= cyc_cnt;
-                state       <= S_IDLE;
+                if (table_mode) begin
+                    if ((desc_idx + 32'd1) < hdr_n_desc) begin
+                        /* table_done_pulse (above) is false this cycle since
+                         * it checks this same condition inverted -- next
+                         * descriptor. */
+                        desc_idx <= desc_idx + 32'd1;
+                        word_i   <= 4'd0;
+                        state    <= S_DESC;
+                    end else begin
+                        /* Last descriptor: table_done_pulse fires THIS cycle
+                         * (state==S_FIN && table_mode && desc_idx+1>=n_desc),
+                         * latching table_done_sticky in the MMIO block. */
+                        table_mode <= 1'b0;
+                        state      <= S_IDLE;
+                    end
+                end else begin
+                    state <= S_IDLE;
+                end
             end
             default: state <= S_IDLE;
             endcase

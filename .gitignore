@@ -27,6 +27,8 @@ firmware/tinyengine_port/test_infer_host
 firmware/quartznet/test_quartznet_host
 # Tile-schedule dumper produced by `make schedule` (feeds sim/quartznet_cycles)
 firmware/quartznet/qn_schedule
+# mp3-to-text mechanical smoke test produced by `make transcribe`
+firmware/quartznet/qn_transcribe
 
 # ─── Verilator simulation build artefacts ────────────────────────────────────
 sim/verilator/obj_dir/

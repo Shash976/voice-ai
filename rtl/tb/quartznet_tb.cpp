@@ -78,8 +78,20 @@ enum {
     REG_IN_BASE = 17, REG_IN_PITCH = 18, REG_IN_CBASE = 19,
     REG_OUT_BASE = 20, REG_OUT_PITCH = 21, REG_OUT_CBASE = 22,
     REG_RES_BASE = 23, REG_RES_PITCH = 24,
-    REG_W_OFF = 25, REG_BIAS_OFF = 26, REG_QMULT_OFF = 27, REG_RSHIFT_OFF = 28
+    REG_W_OFF = 25, REG_BIAS_OFF = 26, REG_QMULT_OFF = 27, REG_RSHIFT_OFF = 28,
+    /* Increment 2: autonomous table walking. */
+    REG_TABLE_BASE = 29, REG_W_BLOB_BASE = 30, REG_QP_BLOB_BASE = 31,
+    REG_DESC_IDX = 32
 };
+
+/* CTRL bits */
+#define CTRL_START      0x1u
+#define CTRL_RUN_TABLE  0x2u
+/* STATUS bits */
+#define STATUS_BUSY           0x1u
+#define STATUS_DONE           0x2u
+#define STATUS_TABLE_DONE     0x4u
+#define STATUS_ERR_BAD_IN_OFF 0x8u
 
 /* QSPI layout chosen by this testbench: the weight blob at 0, the qparam blob
  * after it.  The descriptor's w_off / *_off are offsets WITHIN their blob, so
@@ -244,6 +256,162 @@ static uint8_t bd_read(int sel, uint32_t addr)
     uint8_t v = dut->bd_rdata;
     dut->bd_en = 0;
     return v;
+}
+
+/* ── Increment 2: autonomous table-walk test ─────────────────────────────────
+ * Same blobs, same golden as the per-descriptor loop above, but instead of
+ * staging each descriptor's fields over MMIO and pulsing CTRL.START once per
+ * descriptor, this loads the raw descriptor-table bytes into QSPI and lets
+ * quartznet_accel.v's own fetch FSM walk it autonomously: one TABLE_BASE /
+ * W_BLOB_BASE / QP_BLOB_BASE / T_OUT write, one CTRL.RUN_TABLE pulse, one
+ * STATUS.TABLE_DONE poll, then the same PSRAM-vs-golden compare per
+ * descriptor. Runs on a fresh DUT instance so it starts from a clean reset,
+ * independent of whatever state the per-descriptor loop left behind. */
+static int run_table_test(uint32_t n_desc, uint32_t t_out, uint32_t in_ch,
+                           uint32_t in_rows, uint32_t arena_bytes,
+                           const std::vector<Desc> &desc,
+                           const std::vector<uint8_t> &table,
+                           const std::vector<uint8_t> &weights,
+                           const std::vector<uint8_t> &qparams,
+                           const std::vector<uint8_t> &input,
+                           const uint8_t *g_data,
+                           const std::vector<uint32_t> &g_off,
+                           const std::vector<uint32_t> &g_size,
+                           const uint32_t buf_ch[QN_N_BUFFERS],
+                           const uint32_t buf_off[QN_N_BUFFERS])
+{
+    fprintf(stderr, "\n=== table-walk mode (LANES=%d ACC_W=%d) ===\n",
+            TB_LANES, TB_ACC_W);
+
+    uint32_t w_base = 0;
+    uint32_t q_base = (w_base + (uint32_t)weights.size() + 3u) & ~3u;
+    uint32_t t_base = (q_base + (uint32_t)qparams.size() + 3u) & ~3u;
+
+    dut = new Vquartznet_accel;
+    dut->clk = 0; dut->rst_n = 0;
+    dut->mmio_we = 0; dut->mmio_addr = 0; dut->mmio_wdata = 0;
+    dut->bd_en = 0; dut->bd_sel = 0; dut->bd_we = 0;
+    dut->bd_addr = 0; dut->bd_wdata = 0;
+    dut->eval();
+    for (int i = 0; i < 8; i++) tick();
+    dut->rst_n = 1;
+    tick();
+
+    for (size_t i = 0; i < weights.size(); i++)
+        bd_write(0, w_base + (uint32_t)i, weights[i]);
+    for (size_t i = 0; i < qparams.size(); i++)
+        bd_write(0, q_base + (uint32_t)i, qparams[i]);
+    for (size_t i = 0; i < table.size(); i++)
+        bd_write(0, t_base + (uint32_t)i, table[i]);
+
+    for (uint32_t i = 0; i < arena_bytes; i++) bd_write(1, i, 0);
+    {
+        uint32_t pitch = buf_ch[0];
+        for (uint32_t t = 0; t < in_rows; t++)
+            for (uint32_t c = 0; c < in_ch; c++)
+                bd_write(1, buf_off[0] + t * pitch + c,
+                         input[(size_t)t * in_ch + c]);
+    }
+    fprintf(stderr, "  preload done (table %zu B @ 0x%x)\n",
+            table.size(), t_base);
+
+    mmio_write(REG_T_OUT,        t_out);
+    mmio_write(REG_TABLE_BASE,   t_base);
+    mmio_write(REG_W_BLOB_BASE,  w_base);
+    mmio_write(REG_QP_BLOB_BASE, q_base);
+
+    /* BUF_A/BUF_B are ping-pong buffers that LATER descriptors legitimately
+     * overwrite (that reuse is the whole point of the arena layout) -- so
+     * unlike the single-descriptor loop above, we cannot wait for the whole
+     * table to finish and then read every descriptor's slice back: by then
+     * later descriptors have already clobbered earlier ones' output regions.
+     * Snapshot and compare each descriptor's slice the moment DESC_IDX
+     * shows it completed (BEFORE ticking again), same as the single-
+     * descriptor loop does per-CTRL.START. */
+    auto compare_one = [&](uint32_t i, int &pass, int &fail) {
+        const Desc &d = desc[i];
+        uint32_t out_pitch = buf_ch[d.out_buf];
+        int bad = 0;
+        int first_t = -1, first_c = -1, got_v = 0, exp_v = 0;
+        if (g_size[i] != t_out * (uint32_t)d.c_out) {
+            fprintf(stderr, "  [%2u] golden slice size %u != %u\n",
+                    i, g_size[i], t_out * (uint32_t)d.c_out);
+            bad++;
+        } else {
+            for (uint32_t t = 0; t < t_out && bad < 1000000; t++) {
+                for (int c = 0; c < d.c_out; c++) {
+                    uint32_t a = buf_off[d.out_buf] + t * out_pitch
+                               + d.out_off + (uint32_t)c;
+                    int got = (int8_t)bd_read(1, a);
+                    int exp = (int8_t)g_data[g_off[i] + t * (uint32_t)d.c_out
+                                             + (uint32_t)c];
+                    if (got != exp) {
+                        if (bad == 0) {
+                            first_t = (int)t; first_c = c;
+                            got_v = got; exp_v = exp;
+                        }
+                        bad++;
+                    }
+                }
+            }
+        }
+        const char *opn = (d.op == QN_OP_DW) ? "dw" : (d.op == QN_OP_PW) ? "pw"
+                        : (d.op == QN_OP_ADD) ? "add" : "requant";
+        if (bad) {
+            fail++;
+            fprintf(stderr,
+                    "  [%2u] %-7s MISMATCH %d/%u bytes "
+                    "(first t=%d c=%d dut=%d golden=%d)\n",
+                    i, opn, bad, g_size[i], first_t, first_c, got_v, exp_v);
+        } else {
+            pass++;
+        }
+    };
+
+    uint64_t t_start = g_cycles;
+    mmio_write(REG_CTRL, CTRL_RUN_TABLE);
+
+    int pass = 0, fail = 0;
+    uint32_t last_idx = 0;
+    const uint64_t GUARD = 200000000ull;
+    uint64_t guard = 0;
+    bool timeout = false;
+    for (;;) {
+        uint32_t status = mmio_read(REG_STATUS);
+        if (status & STATUS_TABLE_DONE) {
+            compare_one(n_desc - 1, pass, fail);   /* the last descriptor */
+            break;
+        }
+        uint32_t cur_idx = mmio_read(REG_DESC_IDX);
+        if (cur_idx != last_idx) {
+            compare_one(cur_idx - 1, pass, fail);  /* just-completed one */
+            last_idx = cur_idx;
+        }
+        tick();
+        if (++guard > GUARD) {
+            fprintf(stderr, "  TABLE-WALK TIMEOUT after %llu cycles\n",
+                    (unsigned long long)guard);
+            timeout = true;
+            break;
+        }
+    }
+    if (timeout) fail++;
+    uint64_t total_cycles = g_cycles - t_start;
+    mmio_write(REG_STATUS, STATUS_TABLE_DONE);   /* W1C */
+
+    if (mmio_read(REG_STATUS) & STATUS_ERR_BAD_IN_OFF)
+        fprintf(stderr, "  err_bad_in_off latched -- a fetched descriptor had "
+                         "in_off != 0, unsupported by the table walker\n");
+
+    fprintf(stderr,
+            "\n%u/%u descriptors bit-exact in table-walk mode "
+            "(%llu total cycles%s)\n",
+            (unsigned)pass, n_desc, (unsigned long long)total_cycles,
+            timeout ? ", TIMEOUT" : "");
+
+    delete dut;
+    dut = nullptr;
+    return fail ? 1 : 0;
 }
 
 int main(int argc, char **argv)
@@ -521,9 +689,19 @@ int main(int argc, char **argv)
                 "(incl. halo spans)\n", total_tiles, sched.size());
     else
         fprintf(stderr, "tile-walk check SKIPPED (no --sched=)\n");
-    fprintf(stderr, "==== %s : %d failing descriptor(s) ====\n",
+    fprintf(stderr, "==== %s : %d failing descriptor(s) (single-descriptor mode) ====\n",
             fail ? "FAIL" : "PASS", fail);
 
     delete dut;
-    return fail ? 1 : 0;
+    dut = nullptr;
+
+    /* ── Increment 2: same blobs/golden, autonomous table-walk mode ──────── */
+    uint32_t in_rows = buf_rate[0] * t_out;
+    int table_fail = run_table_test(n_desc, t_out, in_ch, in_rows, arena_bytes,
+                                     desc, table, weights, qparams, input,
+                                     g_data, g_off, g_size, buf_ch, buf_off);
+    fprintf(stderr, "==== %s : %d failing descriptor(s) (table-walk mode) ====\n",
+            table_fail ? "FAIL" : "PASS", table_fail);
+
+    return (fail || table_fail) ? 1 : 0;
 }
