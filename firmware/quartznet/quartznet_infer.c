@@ -50,9 +50,25 @@ qn_tile_fn qn_tile_hook = NULL;
 
 const char qn_labels[QN_N_LABELS + 1] = " abcdefghijklmnopqrstuvwxyz'";
 
-/* ── Static activation arena ────────────────────────────────────────────────── */
+/* ── Activation arena ──────────────────────────────────────────────────────────
+ * QN_STATIC_ARENA=1 (default, host/x86 builds): a static QN_ARENA_BYTES array,
+ * pointed to by qn_arena from the start -- behavior identical to before this
+ * was a pointer. QN_STATIC_ARENA=0 (RV32 hardware-dispatch build): no array is
+ * allocated; qn_arena stays NULL until qn_set_arena() is called, or forever if
+ * only the hardware-dispatch API (qn_accel.h) is used, since that path never
+ * touches qn_arena at all. */
+#if QN_STATIC_ARENA
+static int8_t qn_arena_storage[QN_ARENA_BYTES];
+static int8_t *qn_arena = qn_arena_storage;
+#else
+static int8_t *qn_arena = NULL;
+#endif
 
-static int8_t qn_arena[QN_ARENA_BYTES];
+void qn_set_arena(int8_t *arena, size_t bytes)
+{
+    (void)bytes;
+    qn_arena = arena;
+}
 
 /* ── Fixed-point requantize ───────────────────────────────────────────────────
  *
@@ -467,17 +483,15 @@ int qn_gather_output(const qn_model_t *m, int i, int8_t *dst)
 
 /* ── CTC greedy decode (port of quartznet_ref.py::ctc_greedy) ────────────────── */
 
-int qn_ctc_greedy(const qn_model_t *m, char *text, int text_cap)
+int qn_ctc_greedy_buf(const qn_model_t *m, const int8_t *logits, int pitch,
+                      char *text, int text_cap)
 {
-    if (!m->arena_ready) return QN_ERR_ARENA;
-    const int8_t *lg    = qn_arena + m->buf_off[QN_BUF_LOGITS];
-    const int     pitch = (int)m->buf_ch[QN_BUF_LOGITS];
-    const int     ncls  = (int)m->n_classes;
-    const int     blank = (int)m->blank_idx;
+    const int ncls  = (int)m->n_classes;
+    const int blank = (int)m->blank_idx;
 
     int n = 0, prev = -1;
     for (int t = 0; t < m->t_out; t++) {
-        const int8_t *row = lg + (size_t)t * pitch;
+        const int8_t *row = logits + (size_t)t * pitch;
         int best = 0;
         for (int c = 1; c < ncls; c++)          /* argmax, first max wins */
             if ((int)row[c] > (int)row[best]) best = c;
@@ -490,4 +504,12 @@ int qn_ctc_greedy(const qn_model_t *m, char *text, int text_cap)
     if (n >= text_cap) return QN_ERR_TRUNCATED;
     text[n] = '\0';
     return n;
+}
+
+int qn_ctc_greedy(const qn_model_t *m, char *text, int text_cap)
+{
+    if (!m->arena_ready) return QN_ERR_ARENA;
+    const int8_t *lg    = qn_arena + m->buf_off[QN_BUF_LOGITS];
+    const int     pitch = (int)m->buf_ch[QN_BUF_LOGITS];
+    return qn_ctc_greedy_buf(m, lg, pitch, text, text_cap);
 }

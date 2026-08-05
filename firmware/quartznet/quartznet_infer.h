@@ -87,6 +87,17 @@ extern "C" {
 
 #define QN_ARENA_BYTES (QN_ARENA_PER_FRAME * QN_MAX_T_OUT)
 
+/* QN_STATIC_ARENA=1 (default): the interpreter owns a static QN_ARENA_BYTES
+ * array, sized for the host build's QN_MAX_T_OUT -- unchanged behavior.
+ * QN_STATIC_ARENA=0: no array is allocated at all; the caller must point the
+ * interpreter at external storage via qn_set_arena() before qn_set_input()/
+ * qn_run(). This exists for the RV32 hardware-dispatch build, where the
+ * activation arena lives in accelerator PSRAM and the software tile kernels
+ * in this file are never exercised -- see firmware/quartznet/qn_accel.h. */
+#ifndef QN_STATIC_ARENA
+#define QN_STATIC_ARENA 1
+#endif
+
 /* Return codes */
 #define QN_OK              0
 #define QN_ERR_MAGIC      -1
@@ -180,6 +191,12 @@ int qn_load(qn_model_t *m,
             const uint8_t *qparams, size_t qparam_bytes,
             int t_out);
 
+/* Point the interpreter at external arena storage instead of the QN_STATIC_ARENA
+ * default. Must be called (if at all) before qn_set_input()/qn_run()/qn_buffer().
+ * `bytes` is not validated here -- the caller derives it from the same
+ * arena-layout arithmetic qn_load() runs (buf_off/buf_ch/buf_rate/t_out). */
+void qn_set_arena(int8_t *arena, size_t bytes);
+
 /* Zero the arena and load the mel input into BUF_IN ([t_in, in_ch] int8). */
 int qn_set_input(qn_model_t *m, const int8_t *input);
 
@@ -204,6 +221,13 @@ int8_t *qn_buffer(const qn_model_t *m, int b);
  * blanks.  Port of quartznet_ref.py::ctc_greedy().  Writes a NUL-terminated
  * string to `text` and returns the symbol count (or a negative error). */
 int qn_ctc_greedy(const qn_model_t *m, char *text, int text_cap);
+
+/* Same decode, over caller-supplied logits (row-major [m->t_out, pitch], pitch
+ * >= m->n_classes) instead of the arena's BUF_LOGITS. The hardware-dispatch
+ * path uses this to decode logits read back from accelerator PSRAM without
+ * an arena. qn_ctc_greedy() is a thin wrapper over this. */
+int qn_ctc_greedy_buf(const qn_model_t *m, const int8_t *logits, int pitch,
+                      char *text, int text_cap);
 
 /* Label alphabet: " " + a..z + "'" (28 labels; class 28 is the CTC blank). */
 extern const char qn_labels[];
