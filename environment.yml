@@ -14,6 +14,11 @@ dependencies:
   - numpy>=2.0
   - pip
   - pip:
+      # Audio front end (sw/tinyml_reference/quartznet_audio.py) — decodes
+      # mp3/wav/ogg/flac.  The soundfile wheel BUNDLES libsndfile >= 1.2, which
+      # has native MP3 read/write, so no ffmpeg and no system package is needed.
+      # On numpy < 2 pin soundfile==0.12.1; 0.14 requires numpy >= 2.
+      - soundfile>=0.12.1
       # Needed only for Stage A (real QuartzNet weights). The topology,
       # descriptor and golden-reference modules run on numpy alone.
       - onnx>=1.22
