@@ -34,6 +34,7 @@ sim/verilator/sim_picorv32
 sim/verilator/sim_picorv32_debug
 sim/verilator/sim_out.vcd
 rtl/tb/obj_dir/
+rtl/tb/obj_dir_qn/
 
 # ─── ORFS physical-design flow outputs ───────────────────────────────────────
 # All ORFS build output goes to runs/ (WORK_HOME); make/ holds only source configs.

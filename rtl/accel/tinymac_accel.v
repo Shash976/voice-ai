@@ -151,6 +151,12 @@ module tinymac_accel #(
     wire signed [7:0] out_q;
     reg  [15:0] rq_m_q;          /* channel index travelling with the pipeline */
 
+    /* requantize.v gained an `out_raw` output (the scaled value before +out_zp
+     * / ReLU / clamp) for the QuartzNet elementwise-ADD path.  This core has no
+     * use for it — the per-channel datapath is unchanged and still bit-exact —
+     * but the pin must be connected, so it is tied off below. */
+    wire signed [31:0] rq_raw_unused;
+
     requantize u_rq (
         .clk      (clk),
         .rst_n    (rst_n),
@@ -161,8 +167,11 @@ module tinymac_accel #(
         .out_zp   (out_zp_reg),
         .relu     (relu_reg),
         .out_valid(rq_valid),
-        .out_q    (out_q)
+        .out_q    (out_q),
+        .out_raw  (rq_raw_unused)
     );
+
+    wire _unused_raw = &{1'b0, rq_raw_unused};
 
     /* ── Sequencer ──────────────────────────────────────────────────────── */
     always @(posedge clk or negedge rst_n) begin

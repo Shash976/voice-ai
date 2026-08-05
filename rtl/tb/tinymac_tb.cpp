@@ -25,6 +25,16 @@
 #include "Vtinymac_accel.h"
 #include "verilated.h"
 
+/* Verilator 4 keeps VlWide in verilated_heavy.h and declares 65+ bit ports as
+ * raw WData[] arrays; Verilator 5 moved VlWide into verilated_types.h (pulled in
+ * by verilated.h) and uses it for those ports directly.  Including the v4-only
+ * header when it exists lets one testbench build under both. */
+#if defined(__has_include)
+#  if __has_include("verilated_heavy.h")
+#    include "verilated_heavy.h"
+#  endif
+#endif
+
 /* These MUST match the -GLANES / -GACC_W passed to Verilator (see Makefile). */
 #ifndef TB_LANES
 #define TB_LANES 4
@@ -103,6 +113,16 @@ static void store_bytes(T &p, const uint8_t *b, int n)
 
 template <std::size_t N>
 static void store_bytes(VlWide<N> &p, const uint8_t *b, int n)
+{
+    for (std::size_t i = 0; i < N; i++) p[i] = 0;
+    for (int lane = 0; lane < n; lane++)
+        p[lane >> 2] |= (uint32_t)b[lane] << (8 * (lane & 3));
+}
+
+/* Verilator 4 spells the same wide port as a bare WData[N] array, which the
+ * VlWide overload above cannot bind to.  Identical body. */
+template <std::size_t N>
+static void store_bytes(uint32_t (&p)[N], const uint8_t *b, int n)
 {
     for (std::size_t i = 0; i < N; i++) p[i] = 0;
     for (int lane = 0; lane < n; lane++)

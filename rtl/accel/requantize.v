@@ -69,7 +69,17 @@ module requantize (
 
     /* ── Stage-2 result ─────────────────────────────────────────────────── */
     output reg                out_valid, /* 1 cycle after in_valid */
-    output wire signed [7:0]  out_q      /* requantized int8 result */
+    output wire signed [7:0]  out_q,     /* requantized int8 result */
+
+    /* Scaled result BEFORE +out_zp / ReLU / int8 clamp — i.e. exactly what the
+     * software `requantize()` returns, truncated to int32 the same way its
+     * `return (int32_t)val;` does.  Valid alongside out_valid.
+     *
+     * This exists for the TFLite ADD path (requantize_add.v), which pre-scales
+     * two operands into a shared domain and must sum them at full int32 width
+     * before the final requantize.  Purely additive: out_q and every existing
+     * port are bit-identical to before. */
+    output wire signed [31:0] out_raw
 );
 
     /* ── Stage 1: the 64-bit signed multiply (the critical path) ────────── */
@@ -124,6 +134,9 @@ module requantize (
         else
             shifted = q31;
     end
+
+    /* Software `requantize()` returns int32; expose the same truncation. */
+    assign out_raw = shifted[31:0];
 
     /* + out_zp, then ReLU floor at out_zp, then clamp to int8. */
     wire signed [63:0] out_zp_e = $signed({{32{out_zp[31]}}, out_zp});

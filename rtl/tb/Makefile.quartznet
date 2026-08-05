@@ -1,0 +1,71 @@
+# Makefile.quartznet — Verilator unit test for the descriptor-driven
+# quartznet_accel core.
+#
+#   make -f Makefile.quartznet              build + run at the default LANES
+#   make -f Makefile.quartznet LANES=16     a different lane count
+#   make -f Makefile.quartznet clean
+#
+# Follows the same convention as the TinyVAD Makefile: the RTL gets -GLANES /
+# -GACC_W, and the C++ side gets matching -DTB_* so its reporting tracks the
+# build.  ACC_W is 32 and is NOT a swept axis here — ACC_W=24 saturates for any
+# pointwise with c_in >= 260 (CLAUDE.md gotcha (b)).
+#
+# The goldens are produced by, and must be regenerated with:
+#     python3 sw/tinyml_reference/quartznet_ref.py --reduced
+
+LANES ?= 32
+ACC_W ?= 32
+
+# Memory-model latencies. Non-zero jitter makes the stall length vary per
+# request so the sequencer cannot be accidentally tuned to a fixed latency.
+QSPI_LAT   ?= 6
+PSRAM_LAT  ?= 3
+LAT_JITTER ?= 1
+
+RTL_DIR := ../accel
+RTL := $(RTL_DIR)/quartznet_accel.v $(RTL_DIR)/addr_gen.v \
+       $(RTL_DIR)/ext_mem_if.v $(RTL_DIR)/int8_mac_array.v \
+       $(RTL_DIR)/requantize.v $(RTL_DIR)/requantize_add.v
+
+GOLDEN_DIR ?= ../../build/quartznet_reduced
+T_OUT      ?= 70
+
+# Authoritative tile schedule, dumped straight out of the C interpreter's own
+# qn_walk().  The testbench checks addr_gen's tile grid against it — the only
+# check that covers halo retention, which is invisible in the activations.
+QN_DIR   := ../../firmware/quartznet
+SCHEDULE := $(GOLDEN_DIR)/quartznet_schedule.csv
+
+VERILATOR ?= verilator
+TOP := quartznet_accel
+BIN := V$(TOP)
+
+VFLAGS := --cc --exe --build -Wall -Wno-DECLFILENAME \
+          --top-module $(TOP) \
+          -GLANES=$(LANES) -GACC_W=$(ACC_W) \
+          -GQSPI_LAT=$(QSPI_LAT) -GPSRAM_LAT=$(PSRAM_LAT) \
+          -GLAT_JITTER=$(LAT_JITTER) \
+          -CFLAGS "-DTB_LANES=$(LANES) -DTB_ACC_W=$(ACC_W) -O2"
+
+.PHONY: all run goldens clean
+all: run
+
+# Regenerate the reference blobs if they are missing.
+$(GOLDEN_DIR)/quartznet_golden.bin:
+	python3 ../../sw/tinyml_reference/quartznet_ref.py --reduced
+
+goldens: $(GOLDEN_DIR)/quartznet_golden.bin
+
+$(SCHEDULE): $(GOLDEN_DIR)/quartznet_desc.bin
+	$(MAKE) -C $(QN_DIR) schedule
+	$(QN_DIR)/qn_schedule $(GOLDEN_DIR)/quartznet_desc.bin $(T_OUT) > $@
+
+schedule: $(SCHEDULE)
+
+run: $(GOLDEN_DIR)/quartznet_golden.bin $(SCHEDULE)
+	$(VERILATOR) $(VFLAGS) $(RTL) quartznet_tb.cpp -o $(BIN) --Mdir obj_dir_qn
+	@echo "── running (LANES=$(LANES)) ──"
+	./obj_dir_qn/$(BIN) --dir=$(GOLDEN_DIR) --sched=$(SCHEDULE)
+
+clean:
+	rm -rf obj_dir_qn
