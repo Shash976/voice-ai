@@ -26,7 +26,7 @@ Full plan: `pocket_ai_voice_recorder_riscv_tinyml_plan.md`
 - ✅ Stage 4: Behavioral TinyMAC accelerator working; 64/64 correct; ~61.4K cycles/inference (~0.6ms @ 100MHz); ~182× speedup vs SW baseline (8 lanes). 16 lanes → ~46.7K cycles, ~240×.
 - ✅ Stage 5: Design-space optimization — extracted to the standalone **[eda-rl](https://github.com/Shash976/eda-rl)** repo (multi-fidelity funnel optimizer over the ORFS flow; design-agnostic via a `DesignSpec` YAML). See that repo's README for the full pipeline; use the pointer above to run it against this accelerator.
 - 🚧 Stage 6: Synthesizable accelerator RTL written (`rtl/accel/{int8_mac_array,requantize,tinymac_accel}.v`) + Verilator unit TB (`rtl/tb/`) bit-exact vs SW golden (45/45, LANES∈{2,4,8}, ACC_W∈{24,32}). **Full nangate45 GDS produced** via classic ORFS make flow on the company VM (`/opt/OpenROAD-flow-scripts`). LANES=4 ACC_W=24: ~19,738µm² (48% util), 230 FFs, **Fmax ≈269 MHz** (period_min 3.72ns); critical path = requantize Q31 multiply, **independent of LANES** → clean area↑/Fmax-flat Pareto. ⚠️ **Both of those facts changed in Stage 7** — requantize is now pipelined (Fmax 414.9 MHz) and the critical path moved to the LANES-*dependent* MAC accumulate path, so the Fmax-flat conclusion no longer holds and the LANES sweep must be re-run. **First asap7 GDS produced** (L4_A24 @ 1.0ns: 1433µm², Fmax 509 MHz, wns −0.96ns). Synth-only area sweep (`physical/orfs/synth_area.sh`): nangate45 L1=12.3K→L16=22.9K µm² (16× MACs, only 1.86× area). Flow files: `physical/orfs/make/{run.sh,sweep.sh,<plat>/tinymac_accel/{config.mk,constraint.sdc}}`. **Gotchas:** (a) bazel-orfs route abandoned (PyPI fetch times out); use classic make flow. (b) Yosys 0.64 asserts `genrtlil.cc:2214` on signed/unsigned mixing — NO `$signed()` on unsigned whole wires, NO signed `integer` params in unsigned exprs, NO mixed-sign `?:` branches (yosys 0.9 + Verilator lint miss these). (c) param sweep via ORFS `VERILOG_TOP_PARAMS="LANES n ACC_W w"` (chparam) + `FLOW_VARIANT` per config. **Behavioral sim matches RTL** on cycle model (`ACCEL_CH_OVERHEAD=2`: latency = `n_outputs×(ceil(K/LANES)+2)`) **and saturation order** (per-LANES-chunk, not per-MAC → acc16 accuracy is lanes-dependent, 47–58/64). Measured AVG_CYCLES: L8=61,400, L16=46,670. Remaining: realistic-clock re-sweep, asap7 sweep (first GDS done). ~~requantize pipelining~~ **done in Stage 7**. (Automated search over these configs is driven externally by the [eda-rl](https://github.com/Shash976/eda-rl) engine, which calls the same ORFS make flow.)
-- 🚧 **Stage 7 — QuartzNet 15x5 ASR pivot** (branch `feat/quartznet-asr-accel`). Product change: the chip transcribes speech itself, replacing Whisper on the Pi. Design doc `docs/07_quartznet_pivot.md`; macro reference `docs/07a_sram_macro_notes.md`; setup `docs/07b_machine_setup.md`. **Done:** (a) **requantize pipelined over 2 cycles → 1.54× Fmax (268.8→414.9 MHz) for +3.3% area**, both variants measured on the same machine (reports committed in `physical/orfs/measured/`); critical path moved from the Q31 multiply to `i_in_chunk→acc`, which **is** LANES-dependent. (b) **TB widened past 8 lanes** (it had `static_assert(TB_LANES<=8)`; Verilator uses `VlWide` above 64-bit ports) — **12/12 pass, LANES∈{1,2,4,8,16,32} × ACC_W∈{24,32}**; LANES=32 is the design point. (c) **fakeram45 SRAM macro spike: full GDS, 0 DRC, WNS 0.00** — first macro integration in this repo. (d) **Software foundation: 187/187 descriptors reproduce** (`sw/tinyml_reference/quartznet_{topology,descriptors,ref}.py`). **Key numbers:** 18,847,040 params = 18.85 MB int8 = MACs *per output frame*; 942 MMAC/s for real-time; 90.6% of MACs are plain GEMM; layer-sequential dataflow with activations in external PSRAM ≈ 6.78 MB/s for a 10 s utterance. **Gotchas:** (a) cross-layer frame tiling is INVALID — cumulative depthwise receptive field is 4,012 frames (80.2 s); tile *within* each layer instead. (b) `ACC_W=32` is mandatory, not a swept axis (ACC_W=24 saturates for any pointwise with c_in≥260, i.e. every layer from B1 on). (c) `fakeram45_1024x32` is the densest macro at 4.005 µm²/byte — the larger `2048x39` is 12.1% *worse* per byte. (d) SRAM will be ~90% of die area, so the dominant area knob is SRAM capacity, not LANES. **Remaining:** `firmware/quartznet/` C interpreter (never written), real int8 weights via NeMo→ONNX→ORT PTQ, Stage C cycle model with a real memory-bandwidth model (the designed off-ramp — do it before more RTL).
+- 🚧 **Stage 7 — QuartzNet 15x5 ASR pivot** (branch `feat/quartznet-asr-accel`). Product change: the chip transcribes speech itself, replacing Whisper on the Pi. Design doc `docs/07_quartznet_pivot.md`; macro reference `docs/07a_sram_macro_notes.md`; setup `docs/07b_machine_setup.md`. **Done:** (a) **requantize pipelined over 2 cycles → 1.54× Fmax (268.8→414.9 MHz) for +3.3% area**, both variants measured on the same machine (reports committed in `physical/orfs/measured/`); critical path moved from the Q31 multiply to `i_in_chunk→acc`, which **is** LANES-dependent. (b) **TB widened past 8 lanes** (it had `static_assert(TB_LANES<=8)`; Verilator uses `VlWide` above 64-bit ports) — **12/12 pass, LANES∈{1,2,4,8,16,32} × ACC_W∈{24,32}**; LANES=32 is the design point. (c) **fakeram45 SRAM macro spike: full GDS, 0 DRC, WNS 0.00** — first macro integration in this repo. (d) **Software foundation: 187/187 descriptors reproduce** (`sw/tinyml_reference/quartznet_{topology,descriptors,ref}.py`). (e) ~~`firmware/quartznet/` C interpreter~~ **written and bit-exact** — table-driven over the QN_DESC format, four ops, static arena, zero tolerance: **187/187 descriptors + transcript byte-identical** on the full 15x5 and **27/27 + transcript** on the reduced config (the only one that exercises `OP_REQUANT`). Tiled T_TILE=32 (time) × DW_CH_TILE=64 (depthwise channels) with halo retention, which is 1,785 tiles at T_out=70 — so bit-exactness against the *untiled* NumPy golden is what proves the tiling. (f) ~~Stage C cycle model~~ **done — and the gate PASSES** (`sim/quartznet_cycles/quartznet_cycles.py`), driven off the interpreter's real schedule via `qn_tile_hook` → `firmware/quartznet/qn_schedule`, so cost model and interpreter cannot drift. Reproduces every committed figure (18,847,040 MACs/frame, 19.68 MB weights+qparams, 48.08 MB activations, 6.78 MB/s at 10 s, 90.65% PW). **Key numbers:** 18,847,040 params = 18.85 MB int8 = MACs *per output frame*; 942 MMAC/s for real-time; 90.6% of MACs are plain GEMM; layer-sequential dataflow with activations in external PSRAM ≈ 6.78 MB/s for a 10 s utterance. **Stage C results @ 414.9 MHz, 10 s utterance:** real-time at *every* LANES ∈ {8,16,32,64} — worst case 1.84× with a 64 KB weight buffer (QSPI-bound, flat across LANES), 3.3×→13.0× once weights stop re-streaming. LANES=32: 372.0 M cycles, 0.897 s, 10,511 MMAC/s, 79.2% array utilisation, 11.2× real-time. **Gotchas:** (a) cross-layer frame tiling is INVALID — cumulative depthwise receptive field is 4,012 frames (80.2 s); tile *within* each layer instead. (b) `ACC_W=32` is mandatory, not a swept axis (ACC_W=24 saturates for any pointwise with c_in≥260, i.e. every layer from B1 on). (c) `fakeram45_1024x32` is the densest macro at 4.005 µm²/byte — the larger `2048x39` is 12.1% *worse* per byte. (d) SRAM will be ~90% of die area, so the dominant area knob is SRAM capacity, not LANES. (e) **the on-chip WEIGHT buffer, not LANES, decides whether the part is QSPI-bound.** At 64 KB, 93/187 descriptors get re-streamed once per time tile → 282 MB/utterance, 14.3× the 19.68 MB floor, and QSPI sets the wall time at every LANES. The widest descriptor is 268,288 B, so **262 KB removes all re-streaming** and QSPI collapses to the floor (0.38 s); the design turns compute-bound. (f) SRAM ports: 8 paired `fakeram45_1024x32` bank pairs = 64 B/cycle, and a MAC eats 2 B (one activation + one weight), so 8 pairs sustain exactly LANES=32 — LANES=64 needs 16 pairs or utilisation falls to 46.3%. (g) the golden model reads every operand from channel 0 but writes at `out_off`, even for a channel-split ADD; that asymmetry *is* the format — matching it is required for bit-exactness. **Remaining:** real int8 weights via NeMo→ONNX→ORT PTQ; LANES resweep and macro orientation (both need OpenROAD, not built here).
 
 ---
 
@@ -49,6 +49,24 @@ The repo lives on Windows at `C:\Users\shash\Desktop\Code\voiceAI`. WSL has a **
 >   need it. Because of this, the `sim/verilator/sim_main.cpp` latency change from Stage 7
 >   (+1 drain cycle per op) is verified against the RTL by `rtl/tb` but **not end-to-end**;
 >   confirm it on the first full-system run.
+
+> **Toolchain state of the current machine (measured 2026-08, Stage 7 software work).**
+> Probe before assuming — this box differs from both boxes described above.
+> - **No conda.** System `python3` 3.10.12 + `numpy` 1.21.5 is enough for the entire pure
+>   software chain: `quartznet_{topology,descriptors,ref}.py`, the goldens, and
+>   `sim/quartznet_cycles/`. Only the NeMo/ONNX PTQ work needs the conda env.
+> - **`riscv64-linux-gnu-gcc` 11 IS present** and targets `-march=rv32imc -mabi=ilp32`;
+>   `firmware/picorv32_baremetal` builds clean (firmware.bin, 144,324 B). This contradicts
+>   the "currently missing" note in `docs/07_quartznet_pivot.md` — the full-system sim may
+>   in fact be runnable here, which would settle the unverified `sim_main.cpp` drain-cycle
+>   change above. `riscv32-unknown-elf-gcc` is absent; use the `CROSS ?= riscv64-linux-gnu`
+>   default.
+> - **No OpenROAD binary.** `~/OpenROAD-flow-scripts` is checked out but its build stopped
+>   at 81% (`build_openroad.log`) and no `openroad` executable exists, so every ORFS item is
+>   blocked here. System `yosys` is **0.9**, which is exactly the version that *misses* the
+>   signed/unsigned assert 0.64 catches — do not treat a clean 0.9 run as synthesis passing.
+> - **Verilator is 4.038**, not the **5.048** `docs/07b_machine_setup.md` documents; `rtl/tb`
+>   and `sim/verilator` were not re-run here.
 
 ---
 
@@ -78,6 +96,20 @@ cd firmware/tinyengine_port
 make host         # gcc x86 binary
 ./test_infer_host # should print "64/64 passed"
 ```
+
+### QuartzNet interpreter + Stage C cost model (Stage 7, x86 host — no RV32/Verilator/ORFS)
+```bash
+cd firmware/quartznet
+make goldens      # regenerate both reference configs into build/ (python3 + numpy)
+make host         # build + run the bit-exact test → "PASS — 2/2 configurations bit-exact"
+make schedule     # build ./qn_schedule, the tile-schedule dumper
+
+python3 sim/quartznet_cycles/quartznet_cycles.py            # 10 s utterance, LANES 8/16/32/64
+python3 sim/quartznet_cycles/quartznet_cycles.py --help     # --seconds/--lanes/--banks/--wt-buf-kb
+```
+The goldens under `build/` are gitignored and reproducible from the seed — regenerate, never
+commit. The cost model shells out to `qn_schedule`, which drives the *real* interpreter's tile
+walker, so the schedule it prices cannot drift from the one the C executes.
 
 ### Verilator simulation (Stage 3)
 ```bash
@@ -173,16 +205,14 @@ Both `tiny_vad_weights.h` and `tiny_vad_test_vectors.h` are **auto-generated** �
 ## Open work / next steps
 
 ### Stage 7 (current — branch `feat/quartznet-asr-accel`)
-1. **`firmware/quartznet/` C interpreter** — never written (the agent producing it died mid-task). The descriptor format and NumPy golden model it validates against are done, so it is unblocked. Must be bit-exact vs `sw/tinyml_reference/quartznet_ref.py`, table-driven, static buffers only.
-2. **Real int8 weights** — NeMo `stt_en_quartznet15x5` → ONNX → ONNX Runtime static per-channel PTQ. Everything so far is validated on *seeded random* weights at the true tensor shapes, which proves format and arithmetic but says nothing about accuracy. Q-ASR measured only +0.29% WER for W8A8, so this is expected to be low-risk.
-3. **Stage C cycle model with a real memory-bandwidth model** — ⚠️ this is the designed off-ramp. `accel_execute()` in `sim/verilator/sim_main.cpp` currently computes the whole matvec instantly against a magic 0-wait-state memory. Do this *before* writing more RTL: if the dataflow does not hold up, everything after it is wasted.
-4. **Re-run the LANES sweep** — the pre-Stage-7 conclusion "area rises with LANES, Fmax stays flat" is now void. The critical path moved onto the LANES-dependent MAC accumulate path.
-5. **Macro orientation experiment** — configs staged at `physical/orfs/make/nangate45/sram_spike/config_{mirror,outward,r0grid}.mk`. 4 macros routed with 0 DRC but that is too few to expose the west-edge-pin problem; test before committing to an ~18-macro floorplan.
+1. **Real int8 weights** — NeMo `stt_en_quartznet15x5` → ONNX → ONNX Runtime static per-channel PTQ. *Deferred:* needs torch/onnx/onnxruntime/NeMo, none installed here, and it changes no tensor shape or integer path that the interpreter and cost model have already validated — everything so far runs on *seeded random* weights at the true shapes, which proves format and arithmetic but says nothing about accuracy. Q-ASR measured only +0.29% WER for W8A8, so this is expected to be low-risk.
+2. **Re-run the LANES sweep** — the pre-Stage-7 conclusion "area rises with LANES, Fmax stays flat" is now void; the critical path moved onto the LANES-dependent MAC accumulate path. *Deferred:* needs OpenROAD, which is not built on this machine (see Environment Split).
+3. **Macro orientation experiment** — configs staged at `physical/orfs/make/nangate45/sram_spike/config_{mirror,outward,r0grid}.mk`. 4 macros routed with 0 DRC but that is too few to expose the west-edge-pin problem; test before committing to an ~18-macro floorplan. *Deferred:* same, needs OpenROAD.
 
 ### Carried over from Stage 6
-6. **Realistic-clock re-sweep** at a clock near the (now 2.41 ns) critical path.
-7. **ASAP7 sweep** — first GDS exists (L4_A24 @ 1.0 ns); next is ~12 configs at 0.8–1.2 ns.
-8. **`physical/orfs/synth_area.sh` is not portable** — hardcodes `$HOME/OpenROAD-flow-scripts` and a bare `yosys`. Use `run.sh` (honours `ORFS_DIR`) meanwhile.
+4. **Realistic-clock re-sweep** at a clock near the (now 2.41 ns) critical path.
+5. **ASAP7 sweep** — first GDS exists (L4_A24 @ 1.0 ns); next is ~12 configs at 0.8–1.2 ns.
+6. **`physical/orfs/synth_area.sh` is not portable** — hardcodes `$HOME/OpenROAD-flow-scripts` and a bare `yosys`. Use `run.sh` (honours `ORFS_DIR`) meanwhile.
 
 ### Optimizer
 The design-space optimizer lives in **[eda-rl](https://github.com/Shash976/eda-rl)**; its roadmap is tracked there. Note Stage 7 changes its search space: SRAM capacity, not LANES, is now the dominant area knob.

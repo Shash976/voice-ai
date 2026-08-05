@@ -24,6 +24,9 @@ firmware/**/*.elf
 firmware/**/*.bin
 # Host-side test binary produced by `make host` (no extension, platform-native ELF)
 firmware/tinyengine_port/test_infer_host
+firmware/quartznet/test_quartznet_host
+# Tile-schedule dumper produced by `make schedule` (feeds sim/quartznet_cycles)
+firmware/quartznet/qn_schedule
 
 # ─── Verilator simulation build artefacts ────────────────────────────────────
 sim/verilator/obj_dir/
