@@ -46,9 +46,15 @@ The repo lives on Windows at `C:\Users\shash\Desktop\Code\voiceAI`. WSL has a **
 > - **Python goes in a conda env**: `conda env create -f environment.yml && conda activate voiceai`.
 > - **A RISC-V toolchain may be missing.** It is needed only for firmware and the
 >   full-system PicoRV32 sim — the unit TB, ORFS flows, and the whole Python chain do not
->   need it. Because of this, the `sim/verilator/sim_main.cpp` latency change from Stage 7
->   (+1 drain cycle per op) is verified against the RTL by `rtl/tb` but **not end-to-end**;
->   confirm it on the first full-system run.
+>   need it. The `sim/verilator/sim_main.cpp` latency change from Stage 7 (+1 drain cycle per
+>   op) is verified against the RTL by `rtl/tb`, **and as of 2026-08 also end-to-end**: on a
+>   machine with `riscv64-linux-gnu-gcc` present, `make -C sim/verilator run` completes
+>   64/64 correct, `avg_cycles=61769` (LANES=8, ACC_W=32). That is 369 cycles above the
+>   pre-Stage-7 documented `L8=61,400` baseline — far more than the `+1`/call change alone
+>   predicts (4 accel calls/inference → ~+4 cycles) — but not investigated further; likely a
+>   different toolchain built the original baseline binary, not a drain-cycle bug (`rtl/tb`
+>   already proves that formula bit-exact against real RTL independently). Re-confirm on a
+>   machine without this toolchain if the gap needs to be closed.
 
 > **Toolchain state of the current machine (measured 2026-08, Stage 7 software work).**
 > Probe before assuming — this box differs from both boxes described above.
@@ -57,10 +63,10 @@ The repo lives on Windows at `C:\Users\shash\Desktop\Code\voiceAI`. WSL has a **
 >   `sim/quartznet_cycles/`. Only the NeMo/ONNX PTQ work needs the conda env.
 > - **`riscv64-linux-gnu-gcc` 11 IS present** and targets `-march=rv32imc -mabi=ilp32`;
 >   `firmware/picorv32_baremetal` builds clean (firmware.bin, 144,324 B). This contradicts
->   the "currently missing" note in `docs/07_quartznet_pivot.md` — the full-system sim may
->   in fact be runnable here, which would settle the unverified `sim_main.cpp` drain-cycle
->   change above. `riscv32-unknown-elf-gcc` is absent; use the `CROSS ?= riscv64-linux-gnu`
->   default.
+>   the "currently missing" note in `docs/07_quartznet_pivot.md` — and the full-system sim
+>   **is** runnable here: `make -C sim/verilator run` completes 64/64 correct (see the
+>   drain-cycle note above). `riscv32-unknown-elf-gcc` is absent; use the
+>   `CROSS ?= riscv64-linux-gnu` default.
 > - **No OpenROAD binary.** `~/OpenROAD-flow-scripts` is checked out but its build stopped
 >   at 81% (`build_openroad.log`) and no `openroad` executable exists, so every ORFS item is
 >   blocked here. System `yosys` is **0.9**, which is exactly the version that *misses* the
