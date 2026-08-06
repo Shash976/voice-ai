@@ -77,7 +77,6 @@ import pathlib
 import re
 import sys
 import tarfile
-import tempfile
 
 import numpy as np
 
@@ -93,17 +92,28 @@ C4_BLOCK_ID = 18
 
 
 def load_state_dict(nemo_path: pathlib.Path) -> dict:
+    import io
     import torch  # local import: only needed here, not at module import time
 
-    with tempfile.TemporaryDirectory() as td:
-        with tarfile.open(nemo_path) as tf:
-            # Member name varies (some .nemo archives store "./model_weights.ckpt",
-            # others "model_weights.ckpt") -- match by basename, not exact path.
-            member = next(m for m in tf.getmembers()
-                          if pathlib.PurePosixPath(m.name).name == "model_weights.ckpt")
-            tf.extract(member, td)
-        sd = torch.load(pathlib.Path(td) / member.name,
-                         map_location="cpu", weights_only=False)
+    with tarfile.open(nemo_path) as tf:
+        # Member name varies (some .nemo archives store "./model_weights.ckpt",
+        # others "model_weights.ckpt") -- match by basename, not exact path.
+        candidates = [m for m in tf.getmembers()
+                      if pathlib.PurePosixPath(m.name).name == "model_weights.ckpt"]
+        if len(candidates) != 1:
+            raise SystemExit(
+                f"{nemo_path}: expected exactly one model_weights.ckpt member, "
+                f"found {len(candidates)}")
+        member = candidates[0]
+        extracted = tf.extractfile(member)
+        if extracted is None:
+            raise SystemExit(
+                f"{nemo_path}: model_weights.ckpt member is not a regular file")
+        data = extracted.read()
+    # Read into memory (no extract-to-disk) and restrict unpickling to tensors/
+    # primitives (weights_only=True) -- this is a checkpoint of unknown/external
+    # provenance, not code we trust to run arbitrary pickle bytecode.
+    sd = torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
     if isinstance(sd, dict) and "state_dict" in sd:
         sd = sd["state_dict"]
     return {k: v.detach().numpy() for k, v in sd.items() if hasattr(v, "detach")}
@@ -129,7 +139,7 @@ def tensor_names(ld: qt.LayerDesc) -> dict | None:
     """Resolve a LayerDesc to its checkpoint tensor names, or None if it carries
     no weights (OP_ADD / OP_REQUANT)."""
     bid = ld.block_id
-    if ld.block_name.endswith("/add"):
+    if ld.op in (qt.OP_ADD, qt.OP_REQUANT):
         return None
     if ld.block_name.endswith("/res"):
         return {"conv": f"encoder.encoder.{bid}.res.0.0.conv.weight",
