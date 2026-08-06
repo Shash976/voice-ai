@@ -122,11 +122,16 @@ quartznet_infer_rv32.o: $(SRCS) quartznet_infer.h
 # ── RV32 firmware (links qn_main.c + qn_accel.c: drives the accelerator over
 # MMIO and prints a transcript over UART -- see sim/verilator_qn to run it) ──
 
-# t_out=70 / in_ch=64 matches the reduced config's fixed defaults (quartznet_ref.py
-# --t-out 70) -- the same table/input `make host` already verifies bit-exact.
+# t_out=70 / in_ch=64 matches quartznet_ref.py's fixed default (--t-out 70,
+# both configs) -- the same table/input `make host` already verifies
+# bit-exact. GOLDEN_DIR selects reduced (default, fast RTL iteration) vs full
+# (make gen-headers GOLDEN_DIR=$(BUILD)/quartznet -- Stage 7 Gap 1 D6).
+GOLDEN_DIR ?= $(BUILD)/quartznet_reduced
+T_OUT      ?= 70
+
 .PHONY: gen-headers
-gen-headers: $(BUILD)/quartznet_reduced/quartznet_golden.bin
-	$(PYTHON) gen_fw_headers.py $(BUILD)/quartznet_reduced 70 64
+gen-headers: $(BUILD)/quartznet_reduced/quartznet_golden.bin $(BUILD)/quartznet/quartznet_golden.bin
+	$(PYTHON) gen_fw_headers.py $(GOLDEN_DIR) $(T_OUT) 64
 
 .PHONY: rv32-fw rv32-size rv32-disasm
 rv32-fw: qn_firmware.bin
