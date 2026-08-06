@@ -81,17 +81,22 @@ enum {
     REG_W_OFF = 25, REG_BIAS_OFF = 26, REG_QMULT_OFF = 27, REG_RSHIFT_OFF = 28,
     /* Increment 2: autonomous table walking. */
     REG_TABLE_BASE = 29, REG_W_BLOB_BASE = 30, REG_QP_BLOB_BASE = 31,
-    REG_DESC_IDX = 32
+    REG_DESC_IDX = 32,
+    /* D4: MEM_* host-access port (replaces bd_* for a real SoC). */
+    REG_MEM_ADDR = 33, REG_MEM_CTRL = 34, REG_MEM_DATA = 35, REG_MEM_FILL = 36
 };
 
 /* CTRL bits */
-#define CTRL_START      0x1u
-#define CTRL_RUN_TABLE  0x2u
+#define CTRL_START        0x1u
+#define CTRL_RUN_TABLE    0x2u
+#define CTRL_SINGLE_STEP  0x8u
 /* STATUS bits */
 #define STATUS_BUSY           0x1u
 #define STATUS_DONE           0x2u
 #define STATUS_TABLE_DONE     0x4u
 #define STATUS_ERR_BAD_IN_OFF 0x8u
+/* MEM_CTRL bits */
+#define MEM_CTRL_AUTOINC 0x2u
 
 /* QSPI layout chosen by this testbench: the weight blob at 0, the qparam blob
  * after it.  The descriptor's w_off / *_off are offsets WITHIN their blob, so
@@ -414,6 +419,191 @@ static int run_table_test(uint32_t n_desc, uint32_t t_out, uint32_t in_ch,
     return fail ? 1 : 0;
 }
 
+/* ── D4: MEM_* host-access port + SINGLE_STEP regression ─────────────────────
+ * Same blobs/golden as run_table_test() above, but preloads/reads back
+ * through MEM_ADDR/MEM_CTRL/MEM_DATA/MEM_FILL (idx 33-36) instead of the
+ * simulation-only bd_* backdoor, and drives the walk with CTRL.SINGLE_STEP
+ * set -- exactly the sequence firmware/quartznet/qn_accel.c's
+ * qn_run_hw_step() uses. Confirms MEM_* is a faithful bd_* replacement (every
+ * other test in this file still uses bd_* unmodified) and that SINGLE_STEP
+ * correctly gates the walker one descriptor at a time. Runs on a fresh DUT,
+ * independent of the tests above. */
+
+enum { MEMBANK_QSPI = 0, MEMBANK_PSRAM = 1 };
+
+static void mem_write_byte(int bank, uint32_t addr, uint8_t val)
+{
+    mmio_write(REG_MEM_CTRL, (uint32_t)bank);
+    mmio_write(REG_MEM_ADDR, addr);
+    mmio_write(REG_MEM_DATA, val);
+}
+
+static uint8_t mem_read_byte(int bank, uint32_t addr)
+{
+    mmio_write(REG_MEM_CTRL, (uint32_t)bank);
+    mmio_write(REG_MEM_ADDR, addr);
+    return (uint8_t)mmio_read(REG_MEM_DATA);
+}
+
+/* Multi-cycle: MEM_FILL asserts STATUS.BUSY until the background bd_* loop
+ * finishes (see quartznet_accel.v's S_MEMFILL). */
+static void mem_fill(int bank, uint32_t addr, uint8_t val, uint32_t n)
+{
+    mmio_write(REG_MEM_CTRL, (uint32_t)bank);
+    mmio_write(REG_MEM_ADDR, addr);
+    mmio_write(REG_MEM_DATA, val);
+    mmio_write(REG_MEM_FILL, n);
+    /* fill_pulse (set this cycle) only reaches S_IDLE's dispatch on the NEXT
+     * edge, so a status check with no intervening tick() would see stale
+     * pre-transition BUSY=0 and return before the fill (or even its own
+     * S_IDLE->S_MEMFILL transition) has happened -- do..while forces at
+     * least one real edge before the first check. */
+    do { tick(); } while (mmio_read(REG_STATUS) & STATUS_BUSY);
+}
+
+static int run_mem_port_test(uint32_t n_desc, uint32_t t_out, uint32_t in_ch,
+                              uint32_t in_rows, uint32_t arena_bytes,
+                              const std::vector<Desc> &desc,
+                              const std::vector<uint8_t> &table,
+                              const std::vector<uint8_t> &weights,
+                              const std::vector<uint8_t> &qparams,
+                              const std::vector<uint8_t> &input,
+                              const uint8_t *g_data,
+                              const std::vector<uint32_t> &g_off,
+                              const std::vector<uint32_t> &g_size,
+                              const uint32_t buf_ch[QN_N_BUFFERS],
+                              const uint32_t buf_off[QN_N_BUFFERS])
+{
+    fprintf(stderr, "\n=== MEM_* port + SINGLE_STEP mode (LANES=%d ACC_W=%d) ===\n",
+            TB_LANES, TB_ACC_W);
+
+    uint32_t w_base = 0;
+    uint32_t q_base = (w_base + (uint32_t)weights.size() + 3u) & ~3u;
+    uint32_t t_base = (q_base + (uint32_t)qparams.size() + 3u) & ~3u;
+
+    dut = new Vquartznet_accel;
+    dut->clk = 0; dut->rst_n = 0;
+    dut->mmio_we = 0; dut->mmio_addr = 0; dut->mmio_wdata = 0;
+    dut->bd_en = 0; dut->bd_sel = 0; dut->bd_we = 0;
+    dut->bd_addr = 0; dut->bd_wdata = 0;
+    dut->eval();
+    for (int i = 0; i < 8; i++) tick();
+    dut->rst_n = 1;
+    tick();
+
+    /* ---- G1.4a: directed MMIO register read/write-back unit test ------- */
+    mmio_write(REG_MEM_ADDR, 0x1234u);
+    if (mmio_read(REG_MEM_ADDR) != 0x1234u) {
+        fprintf(stderr, "  MEM_ADDR readback MISMATCH\n");
+        delete dut; dut = nullptr; return 1;
+    }
+    mmio_write(REG_MEM_CTRL, 0x3u);
+    if (mmio_read(REG_MEM_CTRL) != 0x3u) {
+        fprintf(stderr, "  MEM_CTRL readback MISMATCH\n");
+        delete dut; dut = nullptr; return 1;
+    }
+    mem_write_byte(MEMBANK_PSRAM, 100u, 0xABu);   /* no AUTOINC */
+    if (mem_read_byte(MEMBANK_PSRAM, 100u) != 0xABu) {
+        fprintf(stderr, "  MEM_DATA byte round-trip MISMATCH\n");
+        delete dut; dut = nullptr; return 1;
+    }
+    /* AUTOINC: three consecutive MEM_DATA writes land at 200, 201, 202. */
+    mmio_write(REG_MEM_CTRL, (uint32_t)MEMBANK_PSRAM | MEM_CTRL_AUTOINC);
+    mmio_write(REG_MEM_ADDR, 200u);
+    mmio_write(REG_MEM_DATA, 0x11u);
+    mmio_write(REG_MEM_DATA, 0x22u);
+    mmio_write(REG_MEM_DATA, 0x33u);
+    bool autoinc_ok = (mem_read_byte(MEMBANK_PSRAM, 200u) == 0x11u)
+                    && (mem_read_byte(MEMBANK_PSRAM, 201u) == 0x22u)
+                    && (mem_read_byte(MEMBANK_PSRAM, 202u) == 0x33u);
+    if (!autoinc_ok) {
+        fprintf(stderr, "  MEM_DATA AUTOINC MISMATCH\n");
+        delete dut; dut = nullptr; return 1;
+    }
+    fprintf(stderr, "  directed MMIO register unit test: ok\n");
+
+    /* ---- Preload weights/qparams/table + mel input via MEM_*, not bd_* -- */
+    mmio_write(REG_MEM_CTRL, (uint32_t)MEMBANK_QSPI | MEM_CTRL_AUTOINC);
+    mmio_write(REG_MEM_ADDR, w_base);
+    for (size_t i = 0; i < weights.size(); i++) mmio_write(REG_MEM_DATA, weights[i]);
+    mmio_write(REG_MEM_CTRL, (uint32_t)MEMBANK_QSPI | MEM_CTRL_AUTOINC);
+    mmio_write(REG_MEM_ADDR, q_base);
+    for (size_t i = 0; i < qparams.size(); i++) mmio_write(REG_MEM_DATA, qparams[i]);
+    mmio_write(REG_MEM_CTRL, (uint32_t)MEMBANK_QSPI | MEM_CTRL_AUTOINC);
+    mmio_write(REG_MEM_ADDR, t_base);
+    for (size_t i = 0; i < table.size(); i++) mmio_write(REG_MEM_DATA, table[i]);
+
+    mem_fill(MEMBANK_PSRAM, 0, 0, arena_bytes);
+    {
+        uint32_t pitch = buf_ch[0];
+        for (uint32_t t = 0; t < in_rows; t++) {
+            /* AUTOINC only advances by 1 per write; a row may be narrower
+             * than the buffer's pitch, so re-stage the address every row. */
+            mmio_write(REG_MEM_CTRL, (uint32_t)MEMBANK_PSRAM | MEM_CTRL_AUTOINC);
+            mmio_write(REG_MEM_ADDR, buf_off[0] + t * pitch);
+            for (uint32_t c = 0; c < in_ch; c++)
+                mmio_write(REG_MEM_DATA, input[(size_t)t * in_ch + c]);
+        }
+    }
+    fprintf(stderr, "  preload done via MEM_* (table %zu B @ 0x%x)\n",
+            table.size(), t_base);
+
+    /* ---- SINGLE_STEP table walk, snapshotting each descriptor via MEM_* -- */
+    mmio_write(REG_T_OUT,        t_out);
+    mmio_write(REG_TABLE_BASE,   t_base);
+    mmio_write(REG_W_BLOB_BASE,  w_base);
+    mmio_write(REG_QP_BLOB_BASE, q_base);
+    mmio_write(REG_CTRL, CTRL_RUN_TABLE | CTRL_SINGLE_STEP);
+
+    int pass = 0, fail = 0;
+    const uint64_t GUARD = 200000000ull;
+    uint64_t guard = 0;
+    bool timeout = false;
+
+    for (uint32_t i = 0; i < n_desc && !timeout; i++) {
+        while (!(mmio_read(REG_STATUS) & (STATUS_DONE | STATUS_TABLE_DONE))) {
+            tick();
+            if (++guard > GUARD) {
+                fprintf(stderr, "  SINGLE_STEP TIMEOUT waiting on descriptor %u "
+                                "(status=0x%x desc_idx=%u)\n",
+                        i, mmio_read(REG_STATUS), mmio_read(REG_DESC_IDX));
+                timeout = true; break;
+            }
+        }
+        if (timeout) break;
+
+        const Desc &d = desc[i];
+        uint32_t out_pitch = buf_ch[d.out_buf];
+        int bad = 0;
+        if (g_size[i] != t_out * (uint32_t)d.c_out) {
+            bad = 1;
+        } else {
+            for (uint32_t t = 0; t < t_out && bad < 1000000; t++)
+                for (int c = 0; c < d.c_out; c++) {
+                    uint32_t a = buf_off[d.out_buf] + t * out_pitch
+                               + d.out_off + (uint32_t)c;
+                    int got = (int8_t)mem_read_byte(MEMBANK_PSRAM, a);
+                    int exp = (int8_t)g_data[g_off[i] + t * (uint32_t)d.c_out + (uint32_t)c];
+                    if (got != exp) bad++;
+                }
+        }
+        if (bad) { fail++; fprintf(stderr, "  [%2u] MEM_*+SINGLE_STEP MISMATCH %d bytes\n", i, bad); }
+        else       pass++;
+
+        /* W1C-clear DONE (and TABLE_DONE, harmless if unset): un-pauses the
+         * walker for descriptor i+1, or is simply a no-op on the last one. */
+        mmio_write(REG_STATUS, STATUS_DONE | STATUS_TABLE_DONE);
+    }
+    if (timeout) fail++;
+
+    fprintf(stderr, "\n%u/%u descriptors bit-exact via MEM_*+SINGLE_STEP%s\n",
+            (unsigned)pass, n_desc, timeout ? " (TIMEOUT)" : "");
+
+    delete dut;
+    dut = nullptr;
+    return fail ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
     Verilated::commandArgs(argc, argv);
@@ -703,5 +893,12 @@ int main(int argc, char **argv)
     fprintf(stderr, "==== %s : %d failing descriptor(s) (table-walk mode) ====\n",
             table_fail ? "FAIL" : "PASS", table_fail);
 
-    return (fail || table_fail) ? 1 : 0;
+    /* ── D4: same blobs/golden, MEM_* port + SINGLE_STEP ─────────────────── */
+    int mem_fail = run_mem_port_test(n_desc, t_out, in_ch, in_rows, arena_bytes,
+                                      desc, table, weights, qparams, input,
+                                      g_data, g_off, g_size, buf_ch, buf_off);
+    fprintf(stderr, "==== %s : %d failing descriptor(s) (MEM_*+SINGLE_STEP mode) ====\n",
+            mem_fail ? "FAIL" : "PASS", mem_fail);
+
+    return (fail || table_fail || mem_fail) ? 1 : 0;
 }

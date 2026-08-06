@@ -170,10 +170,14 @@ static uint32_t accel_read(uint32_t offset)
     case R_CYCLES: return cycles_reg;
     case R_DESC_IDX: return table_cur;
     case R_MEM_DATA: {
-        uint32_t v = 0;
-        if (mem_addr + 4 <= bank_size(mem_bank))
-            memcpy(&v, bank_ptr(mem_bank) + mem_addr, 4);
-        if (mem_autoinc) mem_addr += 4;
+        /* Single byte, matching real RTL (quartznet_accel.v's D4 header
+         * comment): this MMIO bus has no ready/wait-state signal, so a
+         * register write must complete in the one cycle mmio_we is
+         * asserted -- a 32-bit transfer through the byte-granular bd_*
+         * backdoor can't be atomic in one cycle. No AUTOINC on read either,
+         * for the same reason real RTL has none: no read-strobe to hang it
+         * off of (firmware/quartznet/qn_accel.c restages MEM_ADDR instead). */
+        uint32_t v = (mem_addr < bank_size(mem_bank)) ? bank_ptr(mem_bank)[mem_addr] : 0u;
         return v;
     }
     default: return 0u;
@@ -224,9 +228,9 @@ static void accel_write(uint32_t offset, uint32_t val)
         break;
     case R_MEM_DATA: {
         mem_fill_byte = (uint8_t)(val & 0xFFu);
-        if (mem_addr + 4 <= bank_size(mem_bank))
-            memcpy(bank_ptr(mem_bank) + mem_addr, &val, 4);
-        if (mem_autoinc) mem_addr += 4;
+        if (mem_addr < bank_size(mem_bank))
+            bank_ptr(mem_bank)[mem_addr] = mem_fill_byte;
+        if (mem_autoinc) mem_addr += 1;   /* write-only, matching real RTL */
         break;
     }
     case R_MEM_FILL: {
