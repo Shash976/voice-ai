@@ -345,7 +345,7 @@ def build_qparams_npz(model: qf.QuartzNetFP32, int8_onnx_path: pathlib.Path,
                 break
         if conv_node is None:
             continue
-        _, w_scale, w_zp = dq_inputs(conv_node.input[1])
+        w_int8, w_scale, w_zp = dq_inputs(conv_node.input[1])
         bias_int32, _, _ = dq_inputs(conv_node.input[2]) if len(conv_node.input) > 2 else (None, None, None)
         if bias_int32 is None and conv_node.input[2] in init:
             bias_int32 = init[conv_node.input[2]]  # plain fp32 fallback, shouldn't occur here
@@ -353,7 +353,7 @@ def build_qparams_npz(model: qf.QuartzNetFP32, int8_onnx_path: pathlib.Path,
         out_scale, out_zp = trace_output_qparams(conv_node.output[0], ld.relu)
         qmap[ld.layer_id] = dict(
             op=qt.OP_NAMES[ld.op],
-            w_scale=w_scale, w_zp=w_zp, bias_int32=bias_int32,
+            w_int8=w_int8, w_scale=w_scale, w_zp=w_zp, bias_int32=bias_int32,
             in_scale=in_scale, in_zp=in_zp,
             out_scale=out_scale, out_zp=out_zp,
         )
