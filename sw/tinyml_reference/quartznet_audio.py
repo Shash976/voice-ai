@@ -9,18 +9,31 @@
 #   python3 sw/tinyml_reference/quartznet_audio.py CLIP.mp3 [CLIP2.wav ...] \
 #           [--out DIR] [--seconds N] [--pad-to 16]
 #
-# ── Status: PLUMBING ONLY, NOT ACCURACY-VALIDATED ────────────────────────────
+# ── Status: NUMERICALLY VALIDATED against the real checkpoint (Stage 7 Gap 2
+#    A1 / gate G2.1, `quartznet_audio_validate.py`) ───────────────────────────
 #
 #   This module reproduces NeMo's `AudioToMelSpectrogramPreprocessor` in plain
-#   numpy.  The *parameters* below are verified against the released config (see
-#   "Source of truth"), but nothing here has been compared numerically against a
-#   running NeMo/torchaudio instance, because neither torch nor librosa is
-#   installed on the machine this was written on.  The mel filterbank HAS been
-#   cross-checked against `librosa.filters.mel` (see `--self-test`, which
-#   compares against a committed digest); the STFT/normalisation path has not.
+#   numpy. `quartznet_audio_validate.py` diffs it against a direct torch.stft
+#   transcription that reads the *checkpoint's own* window/mel-filterbank
+#   buffers (`preprocessor.featurizer.{window,fb}` inside
+#   `stt_en_quartznet15x5.nemo`) — i.e. the exact tensors the trained model
+#   saw, not assumed config defaults. Measured on 22 real LibriSpeech
+#   dev-clean clips (1.4s-32.6s, 40 speakers): max fp32 log-mel diff
+#   1.015e-04 (gate: <1e-3), int8-quantized agreement 100.000% within 1 LSB
+#   (gate: >=99.9%). A 12-mutation battery (wrong window periodicity/length,
+#   htk vs. slaney mel, wrong fmin/fmax, wrong pad mode, no centering, no
+#   preemphasis, wrong mag_power, biased-vs-unbiased std, wrong log guard)
+#   confirms the gate actually has teeth — every mutation is caught with
+#   diffs >=1.4e-2, two-plus orders above the gate threshold.
 #
-#   Treat this as: correct shapes, correct scheme, plausible numbers.  Before any
-#   WER claim, diff one utterance against real NeMo end to end.
+#   NOT independently checked by this gate — both this module and its
+#   validator hardcode the same NeMo-source-read values, so a shared error
+#   would pass silently: preemph=0.97, mag_power=2.0, log_zero_guard=2**-24,
+#   the 1e-5 normalization epsilon. None of these appear as checkpoint
+#   tensors. The only independent check on these four is Step 3's FP32 WER
+#   against NeMo's published number.
+#
+#   Run `python3 quartznet_audio_validate.py <path/to/*.nemo>` to reproduce.
 #
 # ── Source of truth for every constant ───────────────────────────────────────
 #
