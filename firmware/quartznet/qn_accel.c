@@ -71,6 +71,10 @@ void qn_mem_fill(int bank, uint32_t addr, uint8_t val, uint32_t n)
     QN_REG(QN_R_MEM_ADDR) = addr;
     QN_REG(QN_R_MEM_DATA) = (uint32_t)val;
     QN_REG(QN_R_MEM_FILL) = n;
+    /* Genuinely multi-cycle (one bd_* write per byte in hardware) -- must be
+     * polled to completion before any other MEM_* access, or a subsequent
+     * write races the still-running fill and corrupts both. */
+    while (QN_REG(QN_R_STATUS) & QN_STATUS_BUSY) { }
 }
 
 int qn_set_input_hw(const qn_model_t *m, const int8_t *input, const qn_hw_map_t *map)

@@ -107,6 +107,52 @@
  * pack_record()) — so a fetched descriptor with a nonzero in_off latches the
  * flag rather than silently computing a wrong address.
  *
+ * ── Increment (Stage 7 Gap 1 D4): MEM_* host-access port + SINGLE_STEP ───────
+ *
+ * The simulation-only bd_* backdoor (used by rtl/tb) has no analogue on a real
+ * bus: something must let firmware stage the mel input into PSRAM and read
+ * logits back without a testbench. New registers replace it for that purpose,
+ * while bd_* itself is UNCHANGED and still wins whenever the top-level bd_en
+ * INPUT is asserted (so rtl/tb's existing 27/27 path is unaffected bit for
+ * bit) — a real SoC ties bd_en=0, so the MEM_* port always drives ext_mem_if
+ * there.
+ *
+ *  idx  name       acc  notes
+ *  33   MEM_ADDR    RW  byte address within the selected bank
+ *  34   MEM_CTRL    RW  bit0 SEL (0=QSPI,1=PSRAM), bit1 AUTOINC (write only)
+ *  35   MEM_DATA    RW  single byte at MEM_ADDR (bits [7:0]; also latches the
+ *                       MEM_FILL fill byte as a side effect of every write).
+ *                       AUTOINC advances MEM_ADDR by 1 after a WRITE only —
+ *                       this bus has no read-strobe/ready signal at all (every
+ *                       register read is a stateless combinational lookup, as
+ *                       STATUS/CYCLES/DESC_IDX already are), so there is no
+ *                       edge to hang a read-side side-effect off of. Bulk
+ *                       reads (qn_gather_output_hw/qn_read_logits_hw) restage
+ *                       MEM_ADDR before every byte instead.
+ *  36   MEM_FILL    W   write N: fill N bytes from MEM_ADDR with MEM_DATA's
+ *                       low byte, advancing MEM_ADDR. Genuinely multi-cycle
+ *                       (one bd_* write per cycle) — unlike every other
+ *                       register here, this is NOT complete when the mmio_we
+ *                       cycle ends: it asserts BUSY (state S_MEMFILL) until
+ *                       done, polled the same way a compute op's STATUS.BUSY
+ *                       already is. Ignored (N=0 no-op) while busy.
+ *
+ * A MEM_DATA write's bd_* request to ext_mem_if is REGISTERED one cycle
+ * (r_mem_we_q/r_mem_sel_q/r_mem_addr_q/r_mem_wdata_q), not driven
+ * combinationally in the same cycle as the mmio_we that triggered it — the
+ * next MMIO transaction (staging MEM_ADDR for a readback, or the next
+ * MEM_DATA write) already costs its own cycle, so this adds no visible
+ * latency to any of the sequences above.
+ *
+ * CTRL bit3 (SINGLE_STEP, sampled only on the same RUN_TABLE-triggering write)
+ * makes the table walker halt after each descriptor (state S_TWAIT, busy)
+ * until firmware W1C-clears STATUS.DONE — the ack that "I have safely read
+ * this descriptor's output before a later one's ping-pong reuse overwrites
+ * it" (see quartznet_tb.cpp's own DESC_IDX-snapshot comment, and
+ * firmware/quartznet/qn_accel.c's qn_run_hw_step()). Without this, CPU
+ * polling (far slower than rtl/tb's per-cycle poll) cannot reliably catch
+ * every intermediate descriptor before it is clobbered.
+ *
  * Parameters:
  *   LANES — parallel int8 MAC lanes; 32 is the QuartzNet design point.
  *   ACC_W — accumulator width.  MUST be 32 for QuartzNet: ACC_W=24 saturates
@@ -193,7 +239,21 @@ module quartznet_accel #(
     reg        table_done_sticky;
     reg        err_bad_in_off;
     reg        tbl_start_pulse;      /* internal addr_gen kick, one per desc */
+    reg        r_single_step;        /* latched from CTRL[3] at RUN_TABLE time */
     reg [31:0] desc_idx;
+
+    /* ── D4: MEM_* host-access port state ──────────────────────────────── */
+    reg [31:0] r_mem_addr;
+    reg [31:0] r_mem_ctrl;           /* bit0 SEL, bit1 AUTOINC */
+    reg [7:0]  r_mem_fill_byte;
+    reg [31:0] r_fill_remaining;
+    reg        fill_pulse;
+    /* Registered one-cycle-delayed snapshot of a pending bd_* request --
+     * see the "D4: bd_* mux" comment below for why this is registered
+     * rather than combinational. */
+    reg        r_mem_we_q, r_mem_sel_q;
+    reg [31:0] r_mem_addr_q;
+    reg [7:0]  r_mem_wdata_q;
     reg [31:0] hdr_n_desc, hdr_desc_off, hdr_n_buffers;
     reg [3:0]  word_i;               /* 0..15: header/descriptor word fetch */
     reg [3:0]  buf_i;                /* 0..N_BUF_MAX-1: buffer-record fetch */
@@ -220,6 +280,10 @@ module quartznet_accel #(
         8'd6:  mmio_rdata = r_c_out;
         8'd7:  mmio_rdata = r_k;
         8'd32: mmio_rdata = desc_idx;
+        8'd33: mmio_rdata = r_mem_addr;
+        8'd34: mmio_rdata = r_mem_ctrl;
+        8'd35: mmio_rdata = {24'd0, bd_rdata};
+        8'd36: mmio_rdata = r_fill_remaining;
         default: mmio_rdata = 32'd0;
         endcase
     end
@@ -320,6 +384,31 @@ module quartznet_accel #(
     wire        p_req_ready, p_rsp_valid;
     wire [LANES*8-1:0] p_rsp_bytes;
 
+    /* ── D4: bd_* mux ──────────────────────────────────────────────────────
+     * The top-level bd_en INPUT (driven only by rtl/tb) wins whenever it is
+     * asserted, leaving that regression path byte-for-byte unchanged. A real
+     * SoC ties bd_en=0, so the internal MEM_* port (below) always drives
+     * ext_mem_if there.
+     *
+     * The internal side is REGISTERED one cycle (r_mem_we_q/r_mem_sel_q/
+     * r_mem_addr_q/r_mem_wdata_q below), not driven combinationally straight
+     * from mmio_we/mmio_addr -- every other cross-module request in this file
+     * (q_req_valid, p_req_valid) is a register for the same reason: it keeps
+     * the address/data pair that reaches ext_mem_if a stable, already-settled
+     * snapshot instead of a same-cycle combinational path that also happens
+     * to depend on a register (r_mem_addr) this same write can update.
+     *
+     * Reads have no such hazard (no write, nothing else touches ext_mem_if's
+     * state) and must see the CURRENT address the CPU just staged, not a
+     * stale snapshot from whatever the last write happened to be -- so sel/
+     * addr fall back to the live r_mem_ctrl[0]/r_mem_addr whenever a
+     * registered write isn't in flight this exact cycle (r_mem_we_q == 0). */
+    wire        u_mem_bd_en    = bd_en ? bd_en    : 1'b1;
+    wire        u_mem_bd_sel   = bd_en ? bd_sel   : (r_mem_we_q ? r_mem_sel_q  : r_mem_ctrl[0]);
+    wire        u_mem_bd_we    = bd_en ? bd_we    : r_mem_we_q;
+    wire [31:0] u_mem_bd_addr  = bd_en ? bd_addr  : (r_mem_we_q ? r_mem_addr_q : r_mem_addr);
+    wire [7:0]  u_mem_bd_wdata = bd_en ? bd_wdata : r_mem_wdata_q;
+
     ext_mem_if #(
         .LANES (LANES), .QSPI_BYTES (QSPI_BYTES), .PSRAM_BYTES (PSRAM_BYTES),
         .QSPI_LAT (QSPI_LAT), .PSRAM_LAT (PSRAM_LAT), .LAT_JITTER (LAT_JITTER)
@@ -335,8 +424,8 @@ module quartznet_accel #(
         .p_req_stride (p_req_stride), .p_req_mask (p_req_mask),
         .p_req_wdata (p_req_wdata),
         .p_rsp_valid (p_rsp_valid), .p_rsp_bytes (p_rsp_bytes),
-        .bd_en (bd_en), .bd_sel (bd_sel), .bd_we (bd_we),
-        .bd_addr (bd_addr), .bd_wdata (bd_wdata), .bd_rdata (bd_rdata)
+        .bd_en (u_mem_bd_en), .bd_sel (u_mem_bd_sel), .bd_we (u_mem_bd_we),
+        .bd_addr (u_mem_bd_addr), .bd_wdata (u_mem_bd_wdata), .bd_rdata (bd_rdata)
     );
 
     /* ── Operand registers ──────────────────────────────────────────────── */
@@ -440,7 +529,10 @@ module quartznet_accel #(
         S_DESC     = 5'd22,  /* fetch descriptor desc_idx (64B/16 words)  */
         S_DESC_W   = 5'd23,
         S_POPULATE = 5'd24,  /* decode desc_word_r[] into regs 3-28       */
-        S_KICK     = 5'd25;  /* one-cycle handoff to addr_gen (see below) */
+        S_KICK     = 5'd25,  /* one-cycle handoff to addr_gen (see below) */
+        /* ── D4: MEM_FILL / SINGLE_STEP ──────────────────────────────── */
+        S_MEMFILL  = 5'd26,  /* multi-cycle background bd_* fill loop     */
+        S_TWAIT    = 5'd27;  /* single-step: hold until STATUS.DONE clears */
 
     reg [4:0] state;
     reg [2:0] qp_idx;        /* which qparam word is in flight */
@@ -527,16 +619,29 @@ module quartznet_accel #(
             table_mode      <= 1'b0;
             err_bad_in_off  <= 1'b0;
             tbl_start_pulse <= 1'b0;
+            r_single_step   <= 1'b0;
             desc_idx        <= 32'd0;
             hdr_n_desc      <= 32'd0; hdr_desc_off <= 32'd0; hdr_n_buffers <= 32'd0;
             word_i          <= 4'd0;  buf_i        <= 4'd0;  buftbl_phase  <= 1'b0;
             buf_cum         <= 32'd0;
+            /* ── D4: MEM_* port + fill state ──────────────────────────────── */
+            r_mem_addr       <= 32'd0;
+            r_mem_ctrl       <= 32'd0;
+            r_mem_fill_byte  <= 8'd0;
+            r_fill_remaining <= 32'd0;
+            fill_pulse       <= 1'b0;
+            r_mem_we_q       <= 1'b0;
+            r_mem_sel_q      <= 1'b0;
+            r_mem_addr_q     <= 32'd0;
+            r_mem_wdata_q    <= 8'd0;
         end else begin
             start_pulse     <= 1'b0;
             run_table_pulse <= 1'b0;
             rq_launch       <= 1'b0;
             rqa_launch      <= 1'b0;
             tbl_start_pulse <= 1'b0;
+            r_mem_we_q      <= 1'b0;
+            fill_pulse      <= 1'b0;
 
             /* Software register writes.  Textually before the case(state)
              * block below, so if S_POPULATE and a same-cycle software write
@@ -548,7 +653,10 @@ module quartznet_accel #(
                 case (mmio_addr)
                 8'd0:  begin
                     if (mmio_wdata[0] && !accel_busy) start_pulse     <= 1'b1;
-                    if (mmio_wdata[1] && !accel_busy) run_table_pulse <= 1'b1;
+                    if (mmio_wdata[1] && !accel_busy) begin
+                        run_table_pulse <= 1'b1;
+                        r_single_step   <= mmio_wdata[3];
+                    end
                 end
                 8'd1:  begin
                     if (mmio_wdata[1]) done_sticky       <= 1'b0;   /* W1C */
@@ -583,6 +691,20 @@ module quartznet_accel #(
                 8'd29: r_table_base   <= mmio_wdata;
                 8'd30: r_w_blob_base  <= mmio_wdata;
                 8'd31: r_qp_blob_base <= mmio_wdata;
+                8'd33: r_mem_addr     <= mmio_wdata;
+                8'd34: r_mem_ctrl     <= mmio_wdata;
+                8'd35: begin
+                    r_mem_fill_byte <= mmio_wdata[7:0];
+                    r_mem_we_q      <= 1'b1;
+                    r_mem_sel_q     <= r_mem_ctrl[0];
+                    r_mem_addr_q    <= r_mem_addr;      /* pre-increment address */
+                    r_mem_wdata_q   <= mmio_wdata[7:0];
+                    if (r_mem_ctrl[1]) r_mem_addr <= r_mem_addr + 32'd1;   /* AUTOINC, write only */
+                end
+                8'd36: if (mmio_wdata != 32'd0 && !accel_busy) begin
+                    r_fill_remaining <= mmio_wdata;
+                    fill_pulse       <= 1'b1;
+                end
                 default: ;
                 endcase
             end
@@ -617,6 +739,8 @@ module quartznet_accel #(
                     err_bad_in_off <= 1'b0;
                     cyc_cnt        <= 32'd0;
                     state          <= S_HDR;
+                end else if (fill_pulse) begin
+                    state <= S_MEMFILL;
                 end
             end
             /* ---- Increment 2: table header (16 words) ------------------ */
@@ -986,20 +1110,39 @@ module quartznet_accel #(
                     if ((desc_idx + 32'd1) < hdr_n_desc) begin
                         /* table_done_pulse (above) is false this cycle since
                          * it checks this same condition inverted -- next
-                         * descriptor. */
+                         * descriptor. In SINGLE_STEP mode, wait in S_TWAIT for
+                         * firmware to W1C-clear STATUS.DONE (the ack that it
+                         * has safely read this descriptor's output) before
+                         * fetching the next one -- see the D4 header comment. */
                         desc_idx <= desc_idx + 32'd1;
                         word_i   <= 4'd0;
-                        state    <= S_DESC;
+                        state    <= r_single_step ? S_TWAIT : S_DESC;
                     end else begin
                         /* Last descriptor: table_done_pulse fires THIS cycle
                          * (state==S_FIN && table_mode && desc_idx+1>=n_desc),
-                         * latching table_done_sticky in the MMIO block. */
+                         * latching table_done_sticky in the MMIO block. No
+                         * next descriptor to wait for, so SINGLE_STEP doesn't
+                         * apply here regardless of r_single_step. */
                         table_mode <= 1'b0;
                         state      <= S_IDLE;
                     end
                 end else begin
                     state <= S_IDLE;
                 end
+            end
+            /* ---- D4: SINGLE_STEP handoff -------------------------------- */
+            S_TWAIT: begin
+                if (!done_sticky) state <= S_DESC;
+            end
+            /* ---- D4: multi-cycle background fill (one bd_* write/cycle) - */
+            S_MEMFILL: begin
+                r_mem_we_q       <= 1'b1;
+                r_mem_sel_q      <= r_mem_ctrl[0];
+                r_mem_addr_q     <= r_mem_addr;
+                r_mem_wdata_q    <= r_mem_fill_byte;
+                r_mem_addr       <= r_mem_addr + 32'd1;
+                r_fill_remaining <= r_fill_remaining - 32'd1;
+                if (r_fill_remaining <= 32'd1) state <= S_IDLE;
             end
             default: state <= S_IDLE;
             endcase
