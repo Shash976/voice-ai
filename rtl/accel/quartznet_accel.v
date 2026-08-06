@@ -1142,6 +1142,16 @@ module quartznet_accel #(
                 r_mem_wdata_q    <= r_mem_fill_byte;
                 r_mem_addr       <= r_mem_addr + 32'd1;
                 r_fill_remaining <= r_fill_remaining - 32'd1;
+                /* On the last byte, BUSY drops (state<-S_IDLE) the same edge
+                 * that stages this byte's write into r_mem_*_q -- looks like
+                 * BUSY clears one cycle before the write lands, but it does
+                 * not race: ext_mem_if samples r_mem_we_q/addr_q/wdata_q at
+                 * the NEXT edge regardless of what quartznet_accel's own
+                 * registers do meanwhile, so a same-cycle follow-up MEM_*
+                 * access (even a bare combinational MEM_DATA read, which
+                 * this state's own r_mem_we_q?r_mem_addr_q:r_mem_addr mux
+                 * exists to route correctly) cannot observe or clobber a
+                 * stale value. Empirically confirmed at zero-cycle gap. */
                 if (r_fill_remaining <= 32'd1) state <= S_IDLE;
             end
             default: state <= S_IDLE;
