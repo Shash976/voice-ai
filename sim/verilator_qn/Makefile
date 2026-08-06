@@ -71,18 +71,42 @@ VFLAGS_SHIM = --cc --exe --build --trace -O2 \
     -CFLAGS "-O2 -std=c++17 -I$(QN_DIR_ABS)" \
     --Mdir obj_dir --top-module picorv32_soc
 
+# -GQSPI_BYTES/-GPSRAM_BYTES: qn_soc.v's memory-array parameters default to
+# 1 MiB each (rtl/soc/qn_soc.v), which silently truncates CONFIG=full's
+# ~19.7MB QSPI image at Verilate time -- ext_mem_if.v's backdoor loader drops
+# every out-of-range write with no error, the table header reads back all
+# zeros, and quartznet_accel.v's S_BUFTBL_W FSM compares a 4-bit buf_i against
+# an unsigned-wrapped 0xFFFFFFFF that can never match, hanging forever (not a
+# throughput problem -- it never executes a single descriptor). Must track
+# $(QSPI_BYTES)/$(PSRAM_BYTES) exactly, so it's a Verilate-time -G, not a
+# runtime --qspi-bytes/--psram-bytes flag (those only bound the C++-side
+# harness, which was never the mismatched side).
 VFLAGS_RTL = --cc --exe --build --trace -O2 \
     -CFLAGS "-O2 -std=c++17" \
+    -GQSPI_BYTES=$(QSPI_BYTES) -GPSRAM_BYTES=$(PSRAM_BYTES) \
     -Wno-SYNCASYNCNET -Wno-BLKSEQ -Wno-DECLFILENAME \
-    --Mdir obj_dir --top-module qn_soc
+    --Mdir $(MDIR) --top-module qn_soc
 
-SIM_BIN = sim_qn_$(MODE)
+# RTL artifacts are config-specific (obj_dir_rtl_<CONFIG> / sim_qn_rtl_<CONFIG>):
+# switching CONFIG doesn't change any file make's dependency list tracks, so a
+# plain shared --Mdir/SIM_BIN would silently reuse a binary Verilated for the
+# other CONFIG's QSPI_BYTES/PSRAM_BYTES -- the same class of mismatch as above,
+# just self-inflicted at the make layer instead of the Verilator layer.
+ifeq ($(MODE),rtl)
+MDIR    = obj_dir_rtl_$(CONFIG)
+SIM_BIN = sim_qn_rtl_$(CONFIG)
+else
+MDIR    = obj_dir
+SIM_BIN = sim_qn_shim
+endif
 
 .PHONY: all firmware run vcd clean
 
 all: $(SIM_BIN)
 
 # ── Build simulator ──────────────────────────────────────────────────────────
+# NOTE: `make vcd MODE=rtl CONFIG=full` is not supported -- Verilator would
+# try to declare ~25M trace signals for the qmem/pmem arrays at VCD open.
 
 ifeq ($(MODE),shim)
 $(SIM_BIN): $(SOC_V) $(PICORV32_V) sim_main_qn.cpp $(QN_INFER_C)
@@ -90,14 +114,14 @@ $(SIM_BIN): $(SOC_V) $(PICORV32_V) sim_main_qn.cpp $(QN_INFER_C)
 	    -o $(SIM_BIN) \
 	    $(SOC_V) $(PICORV32_V) \
 	    sim_main_qn.cpp $(QN_INFER_C)
-	cp obj_dir/$(SIM_BIN) .
+	cp $(MDIR)/$(SIM_BIN) .
 else
 $(SIM_BIN): $(QN_SOC_V) $(SOC_V) $(PICORV32_V) $(ACCEL_V) sim_main_qn_rtl.cpp
 	$(VERILATOR) $(VFLAGS_RTL) \
 	    -o $(SIM_BIN) \
 	    $(QN_SOC_V) $(SOC_V) $(PICORV32_V) $(ACCEL_V) \
 	    sim_main_qn_rtl.cpp
-	cp obj_dir/$(SIM_BIN) .
+	cp $(MDIR)/$(SIM_BIN) .
 endif
 
 # ── Build firmware + QSPI blobs ──────────────────────────────────────────────
@@ -128,4 +152,4 @@ vcd: $(SIM_BIN) firmware $(GOLDEN_DIR)/quartznet_desc.bin
 # ── Clean ────────────────────────────────────────────────────────────────────
 
 clean:
-	rm -rf obj_dir sim_qn_shim sim_qn_rtl sim_out.vcd
+	rm -rf obj_dir obj_dir_rtl_* sim_qn_shim sim_qn_rtl* sim_out.vcd

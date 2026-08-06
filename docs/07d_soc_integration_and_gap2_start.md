@@ -158,13 +158,23 @@ byte-identical to `build/quartznet/quartznet_golden.txt`.
 
 **Also attempted (not required for D6, opportunistic):**
 `MODE=rtl CONFIG=full` — timed out at 2 billion simulated cycles within a
-10-minute wall-clock budget. This **confirms** the plan's own risk
-assessment: `ext_mem_if.v` is deliberately unoptimized (one outstanding
-request per channel, no prefetch overlap), so a full-config RTL run is
-genuinely impractical at this activation length. The plan's mitigation — a
-combined full-config RTL demo scoped to a ~1s clip (`t_out≈50`), not the
-70-frame/10s reference length — remains the right approach and is still
-open (see "What's left" below).
+10-minute wall-clock budget. **Correction (see the follow-up session that
+closed this out):** this was never a throughput problem — `qn_soc.v`'s
+`QSPI_BYTES`/`PSRAM_BYTES` parameters default to 1 MiB each, and
+`sim/verilator_qn/Makefile`'s RTL build never forwarded `CONFIG=full`'s real
+sizes at Verilate time, so the ~19.7 MB QSPI image was silently truncated,
+the table header read back all zeros, and `quartznet_accel.v`'s
+`S_BUFTBL_W` state compared a 4-bit counter against an unsigned-wrapped
+`0xFFFFFFFF` that can never match — an infinite loop before a single
+descriptor executed, not `ext_mem_if.v`'s lack of prefetch overlap. Once
+`-GQSPI_BYTES=$(QSPI_BYTES) -GPSRAM_BYTES=$(PSRAM_BYTES)` were added to the
+RTL Verilate flags, `MODE=rtl CONFIG=full` at the existing `T_OUT=70` (no
+scope-down needed) completes in ~2m37s wall-clock at 554,542,940 cycles,
+transcript byte-identical to both `MODE=shim CONFIG=full` and the committed
+x86 golden. `ext_mem_if.v`'s blocking one-request-at-a-time design is real
+and does cost real cycles (measured ~10.3× over the Stage C cost model's
+overlapped-DMA estimate for the same op count), but it was never what made
+this time out.
 
 ---
 
@@ -249,20 +259,24 @@ weight+bias, gitignored build products — regenerate from the command above).
 | [#4](https://github.com/Shash976/voice-ai/pull/4) | `feat/quartznet-full-config-shim` | #3 | D6 |
 | [#5](https://github.com/Shash976/voice-ai/pull/5) | `feat/quartznet-nemo-export` | #4 | Gap 2 A0+A2 |
 
-None merged yet — all open for review.
+**Update:** all six PRs above have since merged into `feat/quartznet-asr-accel`
+(merge commit `381890d`). This doc is kept as a record of that session; the
+follow-up work (Gap 1's remaining RTL demo item, then Gap 2's A1/A3-A7) is
+tracked in `~/.claude/plans/gentle-baking-pelican.md` as its own stacked PR
+sequence starting from `feat/quartznet-gap1-rtl-demo`.
 
 ---
 
 ## What's left
 
-### Gap 1 (nearly done)
-- **Combined full-config RTL demo, ~1s clip** (the plan's task #15): scope
-  `t_out≈50` instead of 70/full-length, `QSPI_BYTES` grown to fit the full
-  weight blob (~24 MB, already the shim's default), `PSRAM_BYTES` unaffected
-  (arena at `t_out≈50` is smaller than the already-working `t_out=70` case).
-  This is the one piece of Gap 1 not yet attempted at a size expected to
-  actually finish — the `t_out=70`/full-length attempt above confirmed why
-  the plan scoped this down in the first place.
+### Gap 1 — done
+- ~~Combined full-config RTL demo~~ **done**, and at the original `T_OUT=70`
+  (no scope-down needed — see the correction on D6 above): `MODE=rtl
+  CONFIG=full` completes in ~2m37s wall-clock, 554,542,940 cycles, transcript
+  byte-identical to `MODE=shim CONFIG=full` and the committed x86 golden. The
+  earlier timeout was a Verilate-time parameter-forwarding bug
+  (`QSPI_BYTES`/`PSRAM_BYTES` never reaching the RTL build), not a scale
+  problem — fixed in `sim/verilator_qn/Makefile`.
 
 ### Gap 2 (the bulk of remaining work)
 - **A1 — front-end numerical validation.** Diff
