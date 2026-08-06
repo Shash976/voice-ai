@@ -291,10 +291,23 @@ sequence starting from `feat/quartznet-gap1-rtl-demo`.
   actually uses. Revised and measured: **FP32 WER 4.4392% on dev-clean**,
   0.04% absolute from `stt_en_quartznet15x5`'s own published 4.4% —
   **G2.3: PASS**.
-- **A4 — ORT static per-channel int8 PTQ calibration**, using
-  `dev-clean` (200 utterances, 5/speaker across all 40 speakers, ≤10s each,
-  fixed seed, `CalibrationMethod.Percentile` at 99.99%) run through this
-  repo's own `quartznet_audio.py` front end (not NeMo's), per the plan.
+- ~~A4 — ORT static per-channel int8 PTQ calibration~~ **done, full detail
+  `docs/07f_gap2_a4_int8_calibration.md`.** `dev-clean`, 200 utterances
+  (5/speaker × 40 speakers, ≤10s by filtering not truncating), fixed seed,
+  through this repo's own `quartznet_audio.py` front end (not NeMo's), per
+  the plan — except `CalibrationMethod.Percentile` at **99.999%**, not the
+  plan's 99.99% (measured: 99.99 leaves 10x less gate margin, since clipping
+  error compounds across 15 residual blocks; 99.99 remains selectable via
+  `--percentile` for A7's ablation). **G2.4: PASS** on both splits — dev-clean
+  int8 4.5678% vs fp32 4.4392% (delta 0.1287%, gate 0.30%), test-clean int8
+  4.5002% vs fp32 4.4716% (delta 0.0285%). Two mandatory (not tuning)
+  `extra_options` found by running, not reading docs: `CalibStridedMinMax=1`
+  (Percentile's default calibrator buffers every intermediate tensor for the
+  whole calibration set and crashes on this model's variable-length
+  utterances without it) and `MinimumRealRange=1e-3` (599 near-zero-gamma
+  BN channels would otherwise produce folded int32 biases within a few
+  percent of overflow — harmless to ORT, fatal to the firmware's real int32
+  accumulator).
 - **A5 — the format bridge**: per-channel `(q_mult, rshift)` via
   `export_weights.quantize_multiplier` (imported, proven for TinyVAD, not
   reimplemented), correct bias domain (accumulator units, matching
