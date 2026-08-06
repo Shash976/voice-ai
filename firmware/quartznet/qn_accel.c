@@ -15,53 +15,28 @@ static inline void qn_mem_addr_ctrl(int bank, uint32_t addr, int autoinc)
     QN_REG(QN_R_MEM_ADDR) = addr;
 }
 
+/* MEM_DATA is a single byte, not 32-bit -- see quartznet_accel.v's D4 header
+ * comment: this MMIO bus has no ready/wait-state signal, so a register write
+ * must complete in the one cycle mmio_we is asserted, and a 32-bit transfer
+ * through the byte-granular bd_* backdoor can't be atomic in one cycle. */
 void qn_mem_write(int bank, uint32_t addr, const void *src, uint32_t n)
 {
-    const uint8_t *s     = (const uint8_t *)src;
-    uint32_t       whole = n & ~3u;
-
-    if (whole) {
-        qn_mem_addr_ctrl(bank, addr, 1);
-        for (uint32_t i = 0; i < whole; i += 4) {
-            uint32_t w = (uint32_t)s[i] | ((uint32_t)s[i + 1] << 8)
-                       | ((uint32_t)s[i + 2] << 16) | ((uint32_t)s[i + 3] << 24);
-            QN_REG(QN_R_MEM_DATA) = w;   /* auto-increments MEM_ADDR by 4 */
-        }
-    }
-    uint32_t tail = n - whole;
-    if (tail) {
-        /* Read-modify-write the last word so bytes beyond n aren't clobbered. */
-        qn_mem_addr_ctrl(bank, addr + whole, 0);
-        uint32_t w = QN_REG(QN_R_MEM_DATA);
-        uint8_t  b[4] = { (uint8_t)w, (uint8_t)(w >> 8), (uint8_t)(w >> 16), (uint8_t)(w >> 24) };
-        for (uint32_t j = 0; j < tail; j++) b[j] = s[whole + j];
-        w = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
-        qn_mem_addr_ctrl(bank, addr + whole, 0);
-        QN_REG(QN_R_MEM_DATA) = w;
-    }
+    const uint8_t *s = (const uint8_t *)src;
+    qn_mem_addr_ctrl(bank, addr, 1);
+    for (uint32_t i = 0; i < n; i++)
+        QN_REG(QN_R_MEM_DATA) = s[i];   /* auto-increments MEM_ADDR by 1 */
 }
 
+/* No AUTOINC on read: this bus has no read-strobe, so there is no edge to
+ * hang a read-side auto-increment off of (see quartznet_accel.v) -- MEM_ADDR
+ * is restaged before every byte instead. */
 void qn_mem_read(int bank, uint32_t addr, void *dst, uint32_t n)
 {
-    uint8_t *d     = (uint8_t *)dst;
-    uint32_t whole = n & ~3u;
-
-    if (whole) {
-        qn_mem_addr_ctrl(bank, addr, 1);
-        for (uint32_t i = 0; i < whole; i += 4) {
-            uint32_t w = QN_REG(QN_R_MEM_DATA);   /* auto-increments MEM_ADDR by 4 */
-            d[i]     = (uint8_t)w;
-            d[i + 1] = (uint8_t)(w >> 8);
-            d[i + 2] = (uint8_t)(w >> 16);
-            d[i + 3] = (uint8_t)(w >> 24);
-        }
-    }
-    uint32_t tail = n - whole;
-    if (tail) {
-        qn_mem_addr_ctrl(bank, addr + whole, 0);
-        uint32_t w = QN_REG(QN_R_MEM_DATA);
-        uint8_t  b[4] = { (uint8_t)w, (uint8_t)(w >> 8), (uint8_t)(w >> 16), (uint8_t)(w >> 24) };
-        for (uint32_t j = 0; j < tail; j++) d[whole + j] = b[j];
+    uint8_t *d = (uint8_t *)dst;
+    QN_REG(QN_R_MEM_CTRL) = (uint32_t)(bank & 1);
+    for (uint32_t i = 0; i < n; i++) {
+        QN_REG(QN_R_MEM_ADDR) = addr + i;
+        d[i] = (uint8_t)QN_REG(QN_R_MEM_DATA);
     }
 }
 
@@ -71,6 +46,10 @@ void qn_mem_fill(int bank, uint32_t addr, uint8_t val, uint32_t n)
     QN_REG(QN_R_MEM_ADDR) = addr;
     QN_REG(QN_R_MEM_DATA) = (uint32_t)val;
     QN_REG(QN_R_MEM_FILL) = n;
+    /* Genuinely multi-cycle (one bd_* write per byte in hardware) -- must be
+     * polled to completion before any other MEM_* access, or a subsequent
+     * write races the still-running fill and corrupts both. */
+    while (QN_REG(QN_R_STATUS) & QN_STATUS_BUSY) { }
 }
 
 int qn_set_input_hw(const qn_model_t *m, const int8_t *input, const qn_hw_map_t *map)

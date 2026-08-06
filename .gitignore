@@ -2,6 +2,10 @@
 whisper.cpp/
 speech_commands/
 speech_commands_v0.02.tar.gz
+# Stage 7 Gap 2 A0: NeMo checkpoint (67.7MB, from NGC -- see
+# docs/07_quartznet_pivot.md Stage A) and LibriSpeech (calibration/WER eval).
+stt_en_quartznet15x5.nemo
+librispeech/
 
 # ─── Python tooling ───────────────────────────────────────────────────────────
 venv/
@@ -38,6 +42,7 @@ sim/verilator/obj_dir/
 sim/verilator/sim_picorv32
 sim/verilator_qn/obj_dir/
 sim/verilator_qn/sim_qn_shim
+sim/verilator_qn/sim_qn_rtl
 sim/verilator_qn/sim_out.vcd
 sim/verilator/sim_picorv32_debug
 sim/verilator/sim_out.vcd

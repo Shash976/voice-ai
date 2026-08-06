@@ -4,6 +4,11 @@
 #   conda env create -f environment.yml
 #   conda activate voiceai
 #
+# No-conda machines (Stage 7 A0 -- see docs/07b_machine_setup.md and
+# CLAUDE.md's "toolchain state" note): a plain venv + the pip deps below is
+# enough; only python=3.11/numpy>=2.0 above need conda specifically, and
+# system python3.10 + numpy has been sufficient in practice too.
+#
 # Hardware tooling (Verilator, ORFS, RISC-V GCC) is NOT managed here — see
 # docs/07b_machine_setup.md.
 name: voiceai
@@ -21,5 +26,19 @@ dependencies:
       - soundfile>=0.12.1
       # Needed only for Stage A (real QuartzNet weights). The topology,
       # descriptor and golden-reference modules run on numpy alone.
+      # onnxruntime>=1.28 does not exist (checked 2026-08: latest is 1.23.2)
+      # -- the original pin here was unsatisfiable; relaxed to what's real.
       - onnx>=1.22
-      - onnxruntime>=1.28
+      - onnxruntime>=1.23
+      # Stage A model export: load a .nemo checkpoint's plain PyTorch
+      # state_dict directly (torch.load) -- nemo_toolkit itself is NOT a
+      # dependency here (multi-GB dependency chain: hydra, omegaconf,
+      # pytorch-lightning, sentencepiece, webdataset... for a checkpoint
+      # format that's just a tar of YAML + a state_dict). CPU wheel only;
+      # no GPU expected on either machine this repo has been built on.
+      - torch>=2.2
+      # Front-end numerical validation only (07c gap 2(A1)) -- cross-checks
+      # sw/tinyml_reference/quartznet_audio.py's STFT/normalization against
+      # a real implementation. Not used by any bit-exactness gate.
+      - librosa>=0.10
+      - torchaudio>=2.2
