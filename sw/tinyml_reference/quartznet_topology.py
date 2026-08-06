@@ -217,8 +217,16 @@ def expand(blocks: list[BlockSpec] = BLOCKS,
         for r in range(spec.repeat):
             last_repeat = (r == spec.repeat - 1)
             # ReLU is skipped on the last repeat of a residual block — it moves to
-            # after the add.
-            relu = not (spec.residual and last_repeat)
+            # after the add. It is also skipped on the very last op of the whole
+            # network (the decoder, C4): NeMo's ConvASRDecoder is a bare
+            # Conv1d(bias=True) feeding CTC directly, no BN and no activation.
+            # `spec.residual` alone got this right for every residual block but
+            # wrong for C4 (residual=False -> relu defaulted True) -- verified
+            # against a real forward pass: in fp32 this never flipped the greedy
+            # argmax (the winning logit is always positive on real data), so it
+            # was silently latent, not caught by WER; it matters once int8
+            # clamps at out_zp instead of leaving negative logits alone.
+            relu = not (spec.residual and last_repeat) and not (is_last_block and last_repeat)
 
             if spec.separable:
                 pad = same_padding(spec.k, spec.stride, spec.dilation)
@@ -285,6 +293,9 @@ def expand(blocks: list[BlockSpec] = BLOCKS,
         ld.in_stride = ld.c_in
         ld.out_stride = ld.c_out
 
+    assert not layers[-1].relu, (
+        "the final descriptor (the decoder feeding CTC) must not have relu=True "
+        "-- NeMo's ConvASRDecoder has no activation after it")
     return layers
 
 

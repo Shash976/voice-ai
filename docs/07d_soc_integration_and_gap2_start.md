@@ -279,23 +279,18 @@ sequence starting from `feat/quartznet-gap1-rtl-demo`.
   problem — fixed in `sim/verilator_qn/Makefile`.
 
 ### Gap 2 (the bulk of remaining work)
-- **A1 — front-end numerical validation.** Diff
-  `sw/tinyml_reference/quartznet_audio.py`'s `extract_logmel()` (STFT framing
-  + per-utterance normalization — the mel filterbank itself is already
-  cross-checked against real librosa) against real `torchaudio`/NeMo's own
-  preprocessor, now that `torchaudio` is installed. Real LibriSpeech clips
-  are available (`librispeech/LibriSpeech/dev-clean/`). Per the plan, this
-  should happen **before** A3, since a front-end bug would make every
-  downstream WER number uninterpretable.
-- **A3 — FP32 baseline.** This is the big one not yet started: an actual
-  **forward-pass graph** (not just A2's per-layer tensor mapping) faithfully
-  reproducing the residual/channel-offset wiring `quartznet_topology.expand()`
-  encodes (ping-pong buffer assignment, the `/res` projection path, the
-  `/add` combine) — needed both as the ONNX export target for calibration
-  (A4) and as the thing a WER scorer actually runs. Then a hand-rolled
-  Levenshtein WER scorer (`quartznet_wer.py`, not yet written) against
-  LibriSpeech `test-clean`, gated at "within 0.3% absolute of NeMo's
-  published 3.90%".
+- ~~A1 — front-end numerical validation~~ **done** (`docs/07d`'s own A1
+  detail is unchanged; see this section's item 1 above / `CLAUDE.md`).
+- ~~A3 — FP32 baseline~~ **done, full detail `docs/07e_gap2_a3_fp32_baseline.md`.**
+  Found and fixed a real bug along the way: A2's `BN_EPS=1e-5` should have
+  been `1e-3` (NeMo hardcodes its own eps, does not use PyTorch's default),
+  inflating every folded BN scale ~2-4x and overflowing logits to ~1e31
+  before the fix. The plan's original gate ("within 0.3% of NeMo's published
+  3.90%") also named the wrong checkpoint — 3.90% belongs to
+  `quartznet_15x5_ls_sp`, not the `stt_en_quartznet15x5` checkpoint this repo
+  actually uses. Revised and measured: **FP32 WER 4.4392% on dev-clean**,
+  0.04% absolute from `stt_en_quartznet15x5`'s own published 4.4% —
+  **G2.3: PASS**.
 - **A4 — ORT static per-channel int8 PTQ calibration**, using
   `dev-clean` (200 utterances, 5/speaker across all 40 speakers, ≤10s each,
   fixed seed, `CalibrationMethod.Percentile` at 99.99%) run through this

@@ -395,8 +395,14 @@ def ctc_greedy(logits: np.ndarray, blank: int = BLANK_IDX) -> tuple[list[int], s
     Operating on the int8 logits directly is valid: the decoder output is
     per-tensor quantized, so one positive scale and one zero point are shared by
     all classes and argmax is order-preserving.
+
+    Also used on plain fp32 logits (quartznet_run_fp32.py) -- argmax is
+    dtype-agnostic, so no cast is needed for either caller. A `.astype(np.int32)`
+    cast used to sit here; it was inert for int8 inputs (already representable)
+    but silently truncated fp32 logits to integers before comparison, corrupting
+    the argmax (caught via all-empty greedy transcripts on the fp32 path).
     """
-    ids = np.argmax(logits.astype(np.int32), axis=1)
+    ids = np.argmax(np.asarray(logits), axis=1)
     out: list[int] = []
     prev = -1
     for v in ids:
