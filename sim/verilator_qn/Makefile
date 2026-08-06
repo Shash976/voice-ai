@@ -44,10 +44,12 @@ ifeq ($(CONFIG),full)
 GOLDEN_DIR  = $(REPO_ROOT)/build/quartznet
 QSPI_BYTES  = 25165824
 PSRAM_BYTES = 1048576
-else
+else ifeq ($(CONFIG),reduced)
 GOLDEN_DIR  = $(REPO_ROOT)/build/quartznet_reduced
 QSPI_BYTES  = 1048576
 PSRAM_BYTES = 1048576
+else
+$(error CONFIG must be "reduced" or "full", got "$(CONFIG)")
 endif
 T_OUT = 70
 

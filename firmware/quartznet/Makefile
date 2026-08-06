@@ -130,7 +130,7 @@ GOLDEN_DIR ?= $(BUILD)/quartznet_reduced
 T_OUT      ?= 70
 
 .PHONY: gen-headers
-gen-headers: $(BUILD)/quartznet_reduced/quartznet_golden.bin $(BUILD)/quartznet/quartznet_golden.bin
+gen-headers: $(GOLDEN_DIR)/quartznet_golden.bin
 	$(PYTHON) gen_fw_headers.py $(GOLDEN_DIR) $(T_OUT) 64
 
 .PHONY: rv32-fw rv32-size rv32-disasm
