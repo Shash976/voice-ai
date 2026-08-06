@@ -54,6 +54,7 @@ VFLAGS_SHIM = --cc --exe --build --trace -O2 \
     --Mdir obj_dir --top-module picorv32_soc
 
 VFLAGS_RTL = --cc --exe --build --trace -O2 \
+    -CFLAGS "-O2 -std=c++17" \
     -Wno-SYNCASYNCNET -Wno-BLKSEQ -Wno-DECLFILENAME \
     --Mdir obj_dir --top-module qn_soc
 
