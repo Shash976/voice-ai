@@ -469,6 +469,66 @@ def reduced_table():
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+def run_from_weights(weights_from: pathlib.Path, out: pathlib.Path | None) -> None:
+    """Stage 7 Gap 2 A5/G2.5: re-execute REAL calibrated blobs (from
+    quartznet_export_int8.py) through the same NumPy interpreter make_blobs()
+    uses, instead of generating+calibrating seeded-random weights. This is
+    "the pure re-execution path from emitted blobs alone" -- replay() --
+    with no calibration pass to self-check against (there IS no random
+    forward pass here), so the C interpreter comparison is the real check.
+
+    t_out is DERIVED from quartznet_input.bin's own length, never taken from
+    --t-out -- a t_out mismatch between the exporter and this replay would
+    otherwise silently produce a golden the C interpreter can never match.
+    """
+    d = weights_from
+    out = out or d
+    out.mkdir(parents=True, exist_ok=True)
+
+    table = (d / "quartznet_desc.bin").read_bytes()
+    weights = np.frombuffer((d / "quartznet_weights.bin").read_bytes(), dtype=np.int8)
+    qparams = (d / "quartznet_qparams.bin").read_bytes()
+    hdr, bufs, descs = parse_table(table)
+
+    inp = np.frombuffer((d / "quartznet_input.bin").read_bytes(),
+                        dtype=np.int8).reshape(-1, hdr["in_ch"])
+    rate0 = bufs[0]["rate"]
+    if inp.shape[0] % rate0:
+        raise SystemExit(f"quartznet_input.bin has {inp.shape[0]} frames, not a "
+                         f"multiple of BUF_IN's rate {rate0}")
+    t_out = inp.shape[0] // rate0
+
+    if len(weights) != hdr["weight_bytes"]:
+        raise SystemExit(f"quartznet_weights.bin is {len(weights):,} B, "
+                         f"header expects {hdr['weight_bytes']:,} B")
+    if len(qparams) != hdr["qparam_bytes"]:
+        raise SystemExit(f"quartznet_qparams.bin is {len(qparams):,} B, "
+                         f"header expects {hdr['qparam_bytes']:,} B")
+
+    print("config      : REAL (--weights-from)")
+    print(f"descriptors : {hdr['n_desc']}")
+    print(f"T_out       : {t_out}  (derived from quartznet_input.bin, T_TILE={hdr['t_tile']})")
+
+    run, outs = replay(table, weights, qparams, inp, t_out)
+    ids, text = ctc_greedy(run.buf[BUF_LOGITS][:t_out, :hdr["n_classes"]], hdr["blank_idx"])
+
+    gsz = write_golden(out / "quartznet_golden.bin", outs, t_out, rate0 * t_out, text)
+    L = ["QuartzNet reference run  (real calibrated weights)",
+        f"  source      {d}",
+        f"  descriptors {hdr['n_desc']}",
+        f"  T_out       {t_out}   T_in {rate0 * t_out}",
+        f"  weights     {len(weights):,} B",
+        f"  qparams     {len(qparams):,} B",
+        f"  golden      {gsz:,} B  ({sum(g.size for g in outs):,} activation bytes)",
+        f"  max |acc|   {run.acc_max:,}  (int32 limit {2**31 - 1:,})",
+        "", f"CTC greedy: {len(ids)} symbols", f'transcript: "{text}"']
+    (out / "quartznet_golden.txt").write_text("\n".join(L) + "\n")
+
+    print(f"max |acc|   : {run.acc_max:,} ({100.0 * run.acc_max / (2**31 - 1):.2f}% of int32)")
+    print(f'transcript  : "{text}"  ({len(ids)} symbols)')
+    print(f"wrote       : {out}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="QuartzNet int8 NumPy golden model")
     ap.add_argument("--out", default=None, help="output directory")
@@ -476,9 +536,21 @@ def main() -> None:
                     help="small config (fast; also exercises OP_REQUANT)")
     ap.add_argument("--t-out", type=int, default=70,
                     help="output frames (default 70 = 2 full T_TILE=32 tiles + a "
-                         "6-frame ragged tail)")
+                         "6-frame ragged tail) -- ignored with --weights-from, "
+                         "where t_out is derived from the real input blob")
     ap.add_argument("--seed", type=int, default=20260727)
+    ap.add_argument("--weights-from", type=pathlib.Path, default=None,
+                    help="Stage 7 Gap 2 A5: re-execute real calibrated blobs "
+                         "from this dir (quartznet_export_int8.py's --out) "
+                         "instead of generating+calibrating seeded-random "
+                         "weights. Writes quartznet_golden.{bin,txt} into "
+                         "--out (default: in place, this same dir).")
     args = ap.parse_args()
+
+    if args.weights_from:
+        run_from_weights(args.weights_from,
+                         pathlib.Path(args.out) if args.out else None)
+        return
 
     root = pathlib.Path(__file__).resolve().parent.parent.parent
     sub = "quartznet_reduced" if args.reduced else "quartznet"

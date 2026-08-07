@@ -75,6 +75,30 @@ goldens:
 $(BUILD)/quartznet/quartznet_golden.bin $(BUILD)/quartznet_reduced/quartznet_golden.bin: $(REF)
 	$(MAKE) goldens
 
+# ── real-weights config (Stage 7 Gap 2 A5/G2.5) ────────────────────────────────
+# Needs venv (onnx, for quartznet_export_int8.py) + build/quartznet_int8/
+# (quartznet_calibrate.py's output, Stage 7 Gap 2 A4) + LibriSpeech -- none of
+# which a bare gcc+numpy machine has, so this is a SEPARATE target from
+# `goldens`/`host`, never folded into them (`make host` must keep working on
+# a machine with only the host toolchain + system numpy).
+VENV_PYTHON ?= $(ROOT)/venv/bin/python3
+BUILD_REAL   = $(BUILD)/quartznet_real
+REAL_AUDIO  ?= $(ROOT)/librispeech/LibriSpeech/dev-clean/1272/128104/1272-128104-0008.flac
+REAL_T_OUT  ?= 70
+
+.PHONY: goldens-real
+goldens-real:
+	cd $(ROOT)/sw/tinyml_reference && $(VENV_PYTHON) quartznet_export_int8.py \
+	    --audio $(REAL_AUDIO) --t-out $(REAL_T_OUT) --out $(BUILD_REAL)
+	cd $(ROOT)/sw/tinyml_reference && $(PYTHON) quartznet_ref.py --weights-from $(BUILD_REAL)
+
+.PHONY: host-real
+host-real: test_quartznet_host $(BUILD_REAL)/quartznet_golden.bin
+	./test_quartznet_host $(BUILD_REAL)
+
+$(BUILD_REAL)/quartznet_golden.bin:
+	$(MAKE) goldens-real
+
 # ── host test ─────────────────────────────────────────────────────────────────
 
 .PHONY: host

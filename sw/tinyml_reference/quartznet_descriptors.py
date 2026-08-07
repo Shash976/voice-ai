@@ -140,7 +140,8 @@ class DescriptorTable:
 
     def __init__(self, layers: list[LayerDesc], in_zp: int = -20,
                  t_tile: int = T_TILE, dw_ch_tile: int = DW_CH_TILE,
-                 c_out_tile: int = C_OUT_TILE):
+                 c_out_tile: int = C_OUT_TILE,
+                 zp_out: list[int] | None = None):
         self.layers = layers
         self.in_zp = in_zp
         self.t_tile = t_tile
@@ -163,8 +164,15 @@ class DescriptorTable:
         self.qparam_bytes = q
 
         # Zero points.  ReLU outputs use zp = -128 so the activation occupies the
-        # full [0, 255] unsigned range after (x - zp); everything else is symmetric.
-        self.zp_out = [(-128 if ld.relu else 0) for ld in layers]
+        # full [0, 255] unsigned range after (x - zp); everything else is symmetric
+        # -- this is the SEEDED-RANDOM placeholder (make_blobs() calibrates zp=0
+        # for non-ReLU layers because random weights have no real skew). Real
+        # calibrated quantization does not have this symmetry: measured non-ReLU
+        # out_zp on the real int8 model ranges -78..+93. Pass `zp_out` (post-split
+        # order, one entry per descriptor) to override with real values --
+        # quartznet_export_int8.py does this for every real-weights build.
+        self.zp_out = (list(zp_out) if zp_out is not None
+                       else [(-128 if ld.relu else 0) for ld in layers])
         self._resolve_zps()
 
     def _resolve_zps(self) -> None:

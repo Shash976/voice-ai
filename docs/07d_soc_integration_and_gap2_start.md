@@ -308,13 +308,27 @@ sequence starting from `feat/quartznet-gap1-rtl-demo`.
   BN channels would otherwise produce folded int32 biases within a few
   percent of overflow — harmless to ORT, fatal to the firmware's real int32
   accumulator).
-- **A5 — the format bridge**: per-channel `(q_mult, rshift)` via
-  `export_weights.quantize_multiplier` (imported, proven for TinyVAD, not
-  reimplemented), correct bias domain (accumulator units, matching
-  `quartznet_ref.py`'s zero-point convention, not ORT's), and the `OP_ADD`
-  per-tensor path computed from the *real* per-branch scales (not the
-  current placeholder's `0.5/0.5` TFLite-shortcut hardcode, which is only
-  valid when both operand scales are equal).
+- ~~A5 — the format bridge~~ **done, full detail
+  `docs/07g_gap2_a5_int8_export_bridge.md`.** New
+  `sw/tinyml_reference/quartznet_export_int8.py`, per-channel `(q_mult, rshift)`
+  via `export_weights.quantize_multiplier` (imported, not reimplemented —
+  `export_weights.py` had to be refactored into an importable module first,
+  it previously required `tflite_runtime`/`tensorflow` at module scope,
+  neither installed here), bias domain confirmed correct with zero
+  conversion (re-verified independently, not just trusted from A4's
+  docstring), and the `OP_ADD` per-tensor path computed from the *real*
+  per-branch scales via TFLite's `twice_max` normalization (replacing the
+  placeholder's `0.5/0.5` hardcode) — verified against 200,000 random int8
+  operand pairs per Add, 14/15 exact, 1/15 within 1 count (a rounding tie).
+  **G2.5: PASS** — `make -C firmware/quartznet host-real`: 187/187
+  descriptors + transcript bit-exact between the C interpreter and the
+  NumPy reference, on real calibrated int8 weights. Transcript
+  `"as for etching"` — real English, matching the real audio clip's
+  ground truth prefix. One real bug fixed along the way:
+  `DescriptorTable` hardcoded fake zero points
+  (`zp_out = -128 if relu else 0`) valid only for seeded-random weights;
+  real calibrated non-ReLU `out_zp` ranges −78..+93 — gained an optional
+  `zp_out=` override.
 - **A6 — end-to-end**: `make transcribe` on a real mp3 clip with real
   weights, and WER on `test-clean` within 0.5% absolute of A4's int8-ORT WER.
 - **A7 — calibration-size ablation** (50/200/500 utterances, WER spread
