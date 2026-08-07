@@ -163,7 +163,12 @@ def main() -> None:
               "calibration_overlap_utts": calib_overlap,
               "non_calibration_wer_pct": non_calib_wer,
               "elapsed_s": time.time() - t0}
-    (args.out / f"wer_int8_{args.split}.json").write_text(json.dumps(result, indent=2))
+    result_path = args.out / f"wer_int8_{args.split}.json"
+    if not args.limit:
+        # Only ever write the canonical result file for a full, ungated-scope
+        # run -- a --limit smoke test must never overwrite a real gate result
+        # sitting at this same path with a tiny-sample number.
+        result_path.write_text(json.dumps(result, indent=2))
 
     print()
     ok = True
@@ -195,7 +200,8 @@ def main() -> None:
         ok = False
 
     print(f"wrote {jsonl_path}")
-    print(f"wrote {args.out / f'wer_int8_{args.split}.json'}")
+    if not args.limit:
+        print(f"wrote {result_path}")
 
     if args.limit:
         print(f"(--limit {args.limit}: smoke test only, gate not evaluated)")

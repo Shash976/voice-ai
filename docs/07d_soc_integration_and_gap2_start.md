@@ -344,12 +344,30 @@ sequence starting from `feat/quartznet-gap1-rtl-demo`.
   **0.0000%** from A4's int8-ORT number — verified genuine (460/2620
   hypotheses differ between the two independent paths; the aggregate error
   count coincides exactly).
-- **A7 — calibration-size ablation** (50/200/500 utterances, WER spread
-  < 0.1%) to justify the 200-utterance choice empirically rather than by
-  assertion.
+- ~~A7 — calibration-size ablation~~ **done, full detail
+  `docs/07i_gap2_a7_calibration_ablation.md`.** 50/200/500 utterances (all
+  40 speakers at every size — only per-speaker depth varies, so calibration
+  size is never confounded with speaker diversity), one shared fp32 ONNX
+  export reused across all three so the calibration set is the only varying
+  input. **G2.7: PASS** — spread 0.0901% (gate <0.1000%), but by only 5.4
+  word errors out of 54,402 (0.0099% of the gate band) — a real pass, not
+  a rounding artifact, and documented as thin rather than papered over. The
+  result is non-monotone (50 utterances gives the *lowest* WER, 200 the
+  *highest*), so the honest reading is "calibration saturates by 50
+  utterances," not "200 was necessary." Also found and fixed a real bug
+  along the way, present identically in all three WER gate drivers
+  (A3/A4/A6): each wrote its canonical `wer_*.json` *before* checking
+  `--limit`, so any smoke-test run after a real gate run silently clobbered
+  that gate's own result file — confirmed on disk (`build/quartznet_int8/
+  wer_int8_dev-clean.json` held a stray `--limit 50` run's 7.5061% instead
+  of A4's real 4.5678%).
+
+This closes out Gap 2's core work (A0–A7). All eight steps of this
+session's stack (Gap 1's RTL demo fix, A1, A3–A7) are on stacked, open PRs
+against `feat/quartznet-asr-accel` — see `~/.claude/plans/gentle-baking-pelican.md`
+for the sequence and each step's own `docs/07{e,f,g,h,i}_*.md` writeup.
 
 ### Housekeeping
-- `librispeech/test-clean.tar.gz` is downloaded but not yet extracted.
-- None of the 5 PRs are merged — worth merging the Gap 1 stack (#1-#4) once
-  reviewed, since Gap 2's PRs don't depend on Gap 1's RTL changes and could
-  otherwise keep growing the stack indefinitely.
+- `librispeech/test-clean.tar.gz` was extracted in a later session (needed
+  by A3 onward's WER gates) — `librispeech/LibriSpeech/test-clean/` now has
+  the full 2620-utterance corpus.

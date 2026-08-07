@@ -103,9 +103,10 @@ def select_calibration_clips(root: pathlib.Path = DEV_CLEAN,
                               n_speakers: int = N_SPEAKERS,
                               per_speaker: int = PER_SPEAKER,
                               max_s: float = MAX_CLIP_S,
-                              seed: int = SEED) -> list[pathlib.Path]:
-    """Stratified 5-per-speaker across all 40 dev-clean speakers, capped at
-    10s BY FILTERING, not truncating: extract_logmel(normalize="per_feature")
+                              seed: int = SEED,
+                              total: int | None = None) -> list[pathlib.Path]:
+    """Stratified across all 40 dev-clean speakers, capped at 10s BY
+    FILTERING, not truncating: extract_logmel(normalize="per_feature")
     z-scores each mel bin over the WHOLE clip, so a truncated clip's features
     would be normalized over a window the deployed chip never actually sees
     for that audio -- a naturally-short clip is a real operating point, a
@@ -113,6 +114,19 @@ def select_calibration_clips(root: pathlib.Path = DEV_CLEAN,
     which (per-feature normalization) tend toward slightly wider normalized
     ranges -- the safe (more conservative) direction for a calibration set.
     Mirrors quartznet_audio_validate.select_clips()'s by-speaker grouping.
+
+    `total`, when given (Stage 7 Gap 2 A7's calibration-size ablation),
+    overrides `per_speaker` with a derived per-speaker depth so every size
+    still covers all `n_speakers` speakers -- `n_speakers` is deliberately
+    NOT reduced for a smaller `total`, since `speakers = sorted(...)[:n]`
+    would then drop specific speakers entirely, confounding "calibration
+    size" with "speaker diversity", exactly the variable this ablation is
+    meant to isolate. `total`'s remainder is assigned to the speakers with
+    the DEEPEST <=10s pools (deterministic, consumes zero RNG) rather than
+    randomly, which both maximizes headroom against the thinnest pool and
+    keeps total=200 reproducing this function's own pre-ablation output
+    (per_speaker=5, remainder 0) bit-for-bit -- verified: the same
+    calibration_clips.json, and the same quantize_static output.
     """
     import soundfile as sf
 
@@ -130,16 +144,24 @@ def select_calibration_clips(root: pathlib.Path = DEV_CLEAN,
         for spk, clips in by_speaker.items()
     }
 
-    rng = random.Random(seed)
     speakers = sorted(by_speaker)[:n_speakers]
+    if total is None:
+        counts = {spk: per_speaker for spk in speakers}
+    else:
+        base, rem = divmod(total, len(speakers))
+        order = sorted(speakers, key=lambda s: (-len(short_by_speaker[s]), s))
+        extra = set(order[:rem])
+        counts = {spk: base + (1 if spk in extra else 0) for spk in speakers}
+
+    rng = random.Random(seed)
     picked: list[pathlib.Path] = []
     for spk in speakers:
-        pool = short_by_speaker[spk]
-        if len(pool) < per_speaker:
+        pool, k = short_by_speaker[spk], counts[spk]
+        if len(pool) < k:
             raise SystemExit(
                 f"speaker {spk}: only {len(pool)} clips <= {max_s}s, "
-                f"need {per_speaker}")
-        picked.extend(rng.sample(sorted(pool), per_speaker))
+                f"need {k}")
+        picked.extend(rng.sample(sorted(pool), k))
     return picked
 
 
@@ -370,43 +392,38 @@ def build_qparams_npz(model: qf.QuartzNetFP32, int8_onnx_path: pathlib.Path,
 
 # ══════════════════════════════════════════════════════════════════════════
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--weights", type=pathlib.Path,
-                     default=REPO_ROOT / "build" / "quartznet_nemo" / "folded_weights.npz")
-    ap.add_argument("--out", type=pathlib.Path, default=DEFAULT_OUT)
-    ap.add_argument("--percentile", type=float, default=99.999)
-    ap.add_argument("--seed", type=int, default=SEED)
-    args = ap.parse_args()
+def calibrate(model: qf.QuartzNetFP32, clips: list[pathlib.Path],
+              out_dir: pathlib.Path, percentile: float = 99.999,
+              pre_onnx: pathlib.Path | None = None,
+              want_qparams: bool = True) -> dict:
+    """Run the whole export+calibrate+quantize pipeline for one calibration
+    clip set, writing into `out_dir`. Factored out of `main()` so Stage 7 Gap
+    2 A7's ablation driver can call this three times (varying only `clips`)
+    without shelling out to three separate processes.
 
-    args.out.mkdir(parents=True, exist_ok=True)
+    `pre_onnx`: reuse an already-exported+pre-processed fp32 graph (A7 wants
+    the ONNX export itself held constant across calibration-set sizes, so the
+    calibration set is provably the only varying input -- export it once,
+    pass its path here for every subsequent call). When None (the default,
+    what `main()` uses), exports+pre-processes fresh into `out_dir`.
+
+    Returns {"int8_onnx": path, "n_clips": int, "elapsed_s": float}.
+    """
     t0 = time.time()
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"loading {args.weights} ...")
-    model = qf.load(args.weights)
-
-    print("selecting calibration clips (5/speaker x 40 speakers, dev-clean, <=10s)...")
-    clips = select_calibration_clips(seed=args.seed)
-    print(f"  {len(clips)} clips selected")
-    (args.out / "calibration_clips.json").write_text(
+    (out_dir / "calibration_clips.json").write_text(
         json.dumps([str(p) for p in clips], indent=2))
-
-    print("building calibration tensors...")
     feats = build_calib_tensors(clips)
 
-    fp32_onnx = args.out / "quartznet_fp32.onnx"
-    print(f"exporting ONNX -> {fp32_onnx} ...")
-    export_onnx(model, qa.extract_logmel(qa.load_audio(clips[0])), fp32_onnx)
-    verify_export_roundtrip(model, fp32_onnx, clips)
+    if pre_onnx is None:
+        fp32_onnx = out_dir / "quartznet_fp32.onnx"
+        export_onnx(model, qa.extract_logmel(qa.load_audio(clips[0])), fp32_onnx)
+        verify_export_roundtrip(model, fp32_onnx, clips)
+        pre_onnx = out_dir / "quartznet_fp32_pre.onnx"
+        quant_pre_process(str(fp32_onnx), str(pre_onnx), skip_symbolic_shape=False)
 
-    pre_onnx = args.out / "quartznet_fp32_pre.onnx"
-    print("quant_pre_process (shape inference for the calibrator)...")
-    quant_pre_process(str(fp32_onnx), str(pre_onnx), skip_symbolic_shape=False)
-
-    int8_onnx = args.out / "quartznet_int8.onnx"
-    print(f"quantize_static (Percentile={args.percentile}, per-channel, "
-          f"{len(feats)} calibration utterances)...")
+    int8_onnx = out_dir / "quartznet_int8.onnx"
     reader = LogMelCalibReader(feats)
     quantize_static(
         str(pre_onnx), str(int8_onnx), reader,
@@ -416,31 +433,63 @@ def main() -> None:
         weight_type=QuantType.QInt8,       # in_zp/out_zp/res_zp are signed int8 fields
         calibrate_method=CalibrationMethod.Percentile,
         extra_options={
-            "CalibPercentile": args.percentile,
+            "CalibPercentile": percentile,
             "CalibTensorRangeSymmetric": False,   # asymmetric activations, matches
                                                    # quartznet_ref's (q - in_zp) model
             "CalibStridedMinMax": 1,              # MANDATORY -- see module docstring R1
             "MinimumRealRange": 1e-3,             # MANDATORY -- see module docstring R2
         },
     )
-    print(f"  wrote {int8_onnx} ({int8_onnx.stat().st_size:,} B)")
 
-    print("extracting per-descriptor qparams for A5...")
-    qparams_path = args.out / "qparams_ort.npz"
-    qmap = build_qparams_npz(model, int8_onnx, qparams_path)
-    n_weight_bearing = sum(1 for ld in model.descs if ld.op in (qt.OP_DW, qt.OP_PW))
-    incomplete = [lid for lid, d in qmap.items()
-                  if any(v is None for v in d.values())]
-    if len(qmap) != n_weight_bearing or incomplete:
-        raise SystemExit(
-            f"*** qparam extraction incomplete: {len(qmap)}/{n_weight_bearing} "
-            f"descriptors mapped, {len(incomplete)} with a missing field "
-            f"(first few: {incomplete[:5]}) ***")
-    print(f"  {len(qmap)}/{n_weight_bearing} weight-bearing descriptors mapped, "
-          f"all fields present -> {qparams_path}")
+    if want_qparams:
+        qparams_path = out_dir / "qparams_ort.npz"
+        qmap = build_qparams_npz(model, int8_onnx, qparams_path)
+        n_weight_bearing = sum(1 for ld in model.descs if ld.op in (qt.OP_DW, qt.OP_PW))
+        incomplete = [lid for lid, d in qmap.items()
+                     if any(v is None for v in d.values())]
+        if len(qmap) != n_weight_bearing or incomplete:
+            raise SystemExit(
+                f"*** qparam extraction incomplete: {len(qmap)}/{n_weight_bearing} "
+                f"descriptors mapped, {len(incomplete)} with a missing field "
+                f"(first few: {incomplete[:5]}) ***")
 
-    print(f"\ndone in {time.time() - t0:.1f}s")
-    print(f"next: python3 quartznet_run_int8_ort.py --model {int8_onnx} --split dev-clean")
+    return {"int8_onnx": int8_onnx, "n_clips": len(clips), "elapsed_s": time.time() - t0}
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--weights", type=pathlib.Path,
+                     default=REPO_ROOT / "build" / "quartznet_nemo" / "folded_weights.npz")
+    ap.add_argument("--out", type=pathlib.Path, default=DEFAULT_OUT)
+    ap.add_argument("--percentile", type=float, default=99.999)
+    ap.add_argument("--seed", type=int, default=SEED)
+    ap.add_argument("--calib-size", type=int, default=None,
+                     help="Stage 7 Gap 2 A7: total calibration utterances, "
+                          "spread across all 40 speakers (overrides the "
+                          "default 5/speaker=200 fixed depth). Default None "
+                          "keeps the original 5/speaker/40-speakers=200 path "
+                          "byte-for-byte unchanged.")
+    args = ap.parse_args()
+
+    print(f"loading {args.weights} ...")
+    model = qf.load(args.weights)
+
+    if args.calib_size is None:
+        print("selecting calibration clips (5/speaker x 40 speakers, dev-clean, <=10s)...")
+    else:
+        print(f"selecting calibration clips ({args.calib_size} total, "
+              f"40 speakers, dev-clean, <=10s)...")
+    clips = select_calibration_clips(seed=args.seed, total=args.calib_size)
+    print(f"  {len(clips)} clips selected")
+
+    print("building/exporting/calibrating/quantizing...")
+    result = calibrate(model, clips, args.out, percentile=args.percentile)
+
+    print(f"  wrote {result['int8_onnx']} ({result['int8_onnx'].stat().st_size:,} B)")
+    print(f"  wrote {args.out / 'qparams_ort.npz'}")
+    print(f"\ndone in {result['elapsed_s']:.1f}s")
+    print(f"next: python3 quartznet_run_int8_ort.py --model {result['int8_onnx']} --split dev-clean")
 
 
 if __name__ == "__main__":
