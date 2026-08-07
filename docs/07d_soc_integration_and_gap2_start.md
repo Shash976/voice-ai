@@ -329,8 +329,21 @@ sequence starting from `feat/quartznet-gap1-rtl-demo`.
   (`zp_out = -128 if relu else 0`) valid only for seeded-random weights;
   real calibrated non-ReLU `out_zp` ranges −78..+93 — gained an optional
   `zp_out=` override.
-- **A6 — end-to-end**: `make transcribe` on a real mp3 clip with real
-  weights, and WER on `test-clean` within 0.5% absolute of A4's int8-ORT WER.
+- ~~A6 — end-to-end~~ **done, full detail `docs/07h_gap2_a6_end_to_end_firmware.md`.**
+  Found the prior session's "`qn_transcribe.c` needs zero changes" claim was
+  wrong: `mp3_to_text.py` was quantizing with a placeholder scale instead of
+  the real calibrated model's own (from `quartznet_meta.json`), costing a
+  measured +0.28% absolute WER — more than half of G2.6's 0.5% band, from a
+  single wrong default; fixed with a new `--model-dir` flag. Also needed
+  `QN_MAX_T_OUT` raised (the stock 128 capped the host build at ~3s of
+  audio; test-clean's longest utterance is 34.96s) and new
+  `transcribe-real`/`wer-firmware` Makefile targets. **G2.6: PASS** — real
+  mp3 → real English transcript through the real firmware C interpreter
+  (`"he hoped there would be stew for dinner..."`, 2 errors/29 words vs
+  ground truth), and full test-clean firmware WER **4.5002%**, delta
+  **0.0000%** from A4's int8-ORT number — verified genuine (460/2620
+  hypotheses differ between the two independent paths; the aggregate error
+  count coincides exactly).
 - **A7 — calibration-size ablation** (50/200/500 utterances, WER spread
   < 0.1%) to justify the 200-utterance choice empirically rather than by
   assertion.

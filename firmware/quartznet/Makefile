@@ -123,8 +123,37 @@ transcribe: qn_transcribe \
 	$(PYTHON) $(ROOT)/sw/tinyml_reference/mp3_to_text.py $(MP3)
 	./qn_transcribe
 
+# QN_MAX_T_OUT: the stock 128 caps the activation arena at t_out~=148
+# (QN_ARENA_PER_FRAME=2560 B/frame headroom vs the real ~2205 B/frame used --
+# arena_ready is `2205*t_out <= 2560*QN_MAX_T_OUT`). test-clean's longest
+# utterance is t_out=1748 (34.96s); 2048 covers it with margin, 5.24 MB BSS,
+# host-only (never touches the RV32 firmware build, which has its own much
+# shorter T_OUT). QN_OPT: -O3 -march=native measured BIT-IDENTICAL to -O2
+# over 200 real utterances (~74k output frames) -- pure speed (1.88x), not a
+# behavior change -- but -O2 stays the canonical default since it's what
+# `make host`/`host-real`'s bit-exactness gates already build with.
+QN_MAX_T_OUT ?= 2048
+QN_OPT       ?= -O2
+
 qn_transcribe: $(SRCS) qn_transcribe.c quartznet_infer.h
-	$(CC_HOST) $(CFLAGS_HOST) -o $@ $(SRCS) qn_transcribe.c
+	$(CC_HOST) $(CFLAGS_HOST) $(QN_OPT) -DQN_MAX_T_OUT=$(QN_MAX_T_OUT) \
+	    -o $@ $(SRCS) qn_transcribe.c
+
+# ── A6/G2.6: real weights, real audio, legible transcript ────────────────────
+# mp3_to_text.py only needs numpy+soundfile ($(PYTHON) is enough, no venv);
+# quartznet_export_int8.py (via goldens-real) is what needs $(VENV_PYTHON).
+.PHONY: transcribe-real
+transcribe-real: qn_transcribe $(BUILD_REAL)/quartznet_weights.bin
+	$(PYTHON) $(ROOT)/sw/tinyml_reference/mp3_to_text.py $(MP3) \
+	    --model-dir $(BUILD_REAL) --out-dir $(BUILD_REAL)
+	./qn_transcribe $(BUILD_REAL) $(BUILD_REAL)/mp3_input.bin
+
+# ── A6/G2.6: full-corpus WER through the firmware interpreter ────────────────
+SPLIT ?= test-clean
+.PHONY: wer-firmware
+wer-firmware: qn_transcribe $(BUILD_REAL)/quartznet_weights.bin
+	cd $(ROOT)/sw/tinyml_reference && $(VENV_PYTHON) quartznet_run_firmware.py \
+	    --split $(SPLIT) --binary $(CURDIR)/qn_transcribe --model-dir $(BUILD_REAL)
 
 # ── tile-schedule dumper (feeds sim/quartznet_cycles) ─────────────────────────
 
