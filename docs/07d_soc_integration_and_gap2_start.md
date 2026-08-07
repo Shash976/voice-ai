@@ -367,6 +367,12 @@ session's stack (Gap 1's RTL demo fix, A1, A3–A7) are on stacked, open PRs
 against `feat/quartznet-asr-accel` — see `~/.claude/plans/gentle-baking-pelican.md`
 for the sequence and each step's own `docs/07{e,f,g,h,i}_*.md` writeup.
 
+**Update: the stretch goal is also done** — the original plan's "Combined"
+gate (real RTL *and* real weights, together) is closed, zero code changes
+needed beyond what A5/A6 and Gap 1's RTL demo fix already built; see
+`docs/07j_combined_milestone_real_weights_on_rtl.md`. Every item from this
+doc's original "What's left" is now done.
+
 ### Housekeeping
 - `librispeech/test-clean.tar.gz` was extracted in a later session (needed
   by A3 onward's WER gates) — `librispeech/LibriSpeech/test-clean/` now has
