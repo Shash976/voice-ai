@@ -12,6 +12,7 @@ All measured on nangate45 with the ORFS bundled Yosys 0.64 / OpenROAD, 2026-07-2
 | `tinymac_accel_pristine/` | LANES=4 ACC_W=24, combinational requantize | WNS −1.72 ns → period_min 3.72 ns → **268.8 MHz**; 16,723 µm² |
 | `tinymac_accel_pipelined/` | same, 2-stage pipelined requantize | WNS −0.41 ns → period_min 2.41 ns → **414.9 MHz**; 17,271 µm² |
 | `sram_spike/` | 4 fakeram45 macros (16 KB) | **0 DRC**, WNS 0.00 ns, 68,770 µm² @ 40% util |
+| `quartznet_accel_bringup/` | **QuartzNet accelerator**, LANES=32 ACC_W=32, `ext_mem_if` synthesis-stubbed (see `physical/orfs/stubs/ext_mem_if_synth.v`), `ABC_AREA=1` fast bring-up | **0 DRC**, WNS 0.00 ns @ 10.0 ns target, period_min 6.62 ns → **150.96 MHz**; 120,653 µm² @ 40% util. First-ever physical implementation of this design (different machine/OpenROAD version than the rows above — v26Q2 — and a deliberately fast ABC script, not a final-quality run; see `docs/07l_quartznet_accel_gds.md`) |
 
 Both `tinymac_accel` variants were run **on the same machine with the same
 2.0 ns SDC**, so the 1.54× Fmax comparison is apples-to-apples. (The pristine
