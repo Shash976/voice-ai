@@ -12,6 +12,7 @@ the map. Then follow the numbered docs in order.
 | 05 | [Commands Cheat Sheet](05_commands_cheatsheet.md) | Every command, which machine, expected output, common pitfalls. |
 | 06 | [RTL to GDS](06_rtl_to_gds.md) | Stage 6: synthesizable accelerator RTL, the Verilator correctness gate, ORFS sky130hd/asap7 flow, physical metrics. |
 | — | Stage 5 — Design-space optimization | Extracted to the standalone **[eda-rl](https://github.com/Shash976/eda-rl)** repo: a design-agnostic multi-fidelity funnel optimizer over the ORFS flow. |
+| 07k | [QuartzNet Testing & Orientation](07k_testing_and_orientation.md) | Stage 7 (QuartzNet ASR, a separate/later chip design from Stages 1-6's TinyVAD): folder map, where the RTL/GDS actually live, and the exact commands to transcribe your own audio through the real chip RTL simulation. Start here for Stage 7; the full build log is `07_quartznet_pivot.md` and `07a`-`07j`. |
 
 These docs were written against the actual code (June 2026) and are more precise than
 the top-level [`../README.md`](../README.md) where they differ. The authoritative

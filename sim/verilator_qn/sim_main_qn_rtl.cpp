@@ -32,7 +32,15 @@
 #define RAM_SIZE    (256 * 1024)
 #define UART_ADDR   0x10000000u
 #define EXIT_ADDR   0x10000004u
-#define MAX_CYCLES  2000000000ULL
+// Cycle count scales roughly linearly with T_OUT (~7.9M cycles/output frame,
+// measured: CONFIG=full T_OUT=70 -> 554,542,940 cycles), since ext_mem_if.v
+// re-streams weights per T_TILE=32-frame chunk. The old 2,000,000,000 cap
+// (fine for T_OUT<=70, the repo-wide default used elsewhere for golden/
+// firmware generation) silently truncates any longer run with a TIMEOUT and
+// no transcript once T_OUT exceeds ~250. Raised to cover the full range
+// CONFIG=full's default 1MB PSRAM can hold (T_OUT up to 475, ~9.5s of
+// audio, needing ~3.76B cycles by the same linear estimate) with headroom.
+#define MAX_CYCLES  6000000000ULL
 
 static uint8_t  ram[RAM_SIZE];
 static bool     sim_done  = false;

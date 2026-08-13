@@ -83,7 +83,19 @@ import numpy as np
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import quartznet_topology as qt  # noqa: E402
 
-BN_EPS = 1e-5  # PyTorch BatchNorm1d default; model_config.yaml does not override it.
+# NOT PyTorch's BatchNorm1d default (1e-5). NeMo's JasperBlock hardcodes its
+# own eps in _get_conv_bn_layer -- nemo/collections/asr/parts/submodules/
+# jasper.py (v1.23.0): `nn.BatchNorm1d(out_channels, eps=1e-3, momentum=0.1)`.
+# This is why model_config.yaml doesn't mention it: it isn't a config knob,
+# it's hardcoded in the block builder. Verified this matters, not just a
+# rounding nit -- the checkpoint's running_var values are BELOW 1e-3 (e.g.
+# encoder.encoder.8.mconv.12.running_var.mean() = 5.98e-05), so with the
+# wrong eps=1e-5 the eps term is negligible and every folded layer's scale is
+# inflated ~2-4x; compounded over 80 BN layers this overflows to logits with
+# absmax ~1e31 and a garbage greedy transcript. With the correct eps=1e-3 the
+# same checkpoint produces logits absmax ~38 and a legible, correct
+# transcript (see quartznet_run_fp32.py / docs/07d's Gap 2 A3 section).
+BN_EPS = 1e-3
 
 # quartznet_topology.BLOCKS index of C3 (last *separable=False* encoder block)
 # and C4 (the synthetic decoder-as-a-block entry -- not in encoder.encoder at all).
@@ -248,6 +260,25 @@ def export(nemo_path: pathlib.Path, out_dir: pathlib.Path) -> None:
         print("zero unexplained unused tensors "
               "(everything outside the mapped layers is preprocessor/"
               "spec_augment/BN-counter bookkeeping)")
+
+    # Numeric guard against a wrong BN_EPS (or any other BN-fold error) --
+    # G2.2's other checks are all shape/name checks and pass identically
+    # whether BN_EPS is right or 100x wrong, which is exactly how a real
+    # ~1e31-logit-blowup bug shipped through this gate once already (see
+    # BN_EPS's own comment above). A folded conv weight/bias in a sane fp32
+    # range is necessary (not sufficient) for a correct fold -- catches gross
+    # eps/scale errors here instead of only downstream in a WER number.
+    bad_scale = [lid for lid in checkpoint_map
+                 if float(np.abs(folded[f"w{lid}"]).max()) > 100.0
+                 or float(np.abs(folded[f"b{lid}"]).max()) > 100.0]
+    if bad_scale:
+        print(f"*** {len(bad_scale)} layer(s) with folded |weight| or |bias| "
+              f"> 100 (a BN_EPS/fold error inflates these silently -- shape/"
+              f"name checks above cannot catch it): {bad_scale[:10]} ***")
+        ok = False
+    else:
+        print("folded weight/bias magnitudes all sane (< 100) -- "
+              "no BN-fold scale blowup")
 
     if not ok:
         raise SystemExit("quartznet_nemo_export: G2.2 checks FAILED")

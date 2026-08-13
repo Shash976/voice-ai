@@ -1,18 +1,30 @@
-# physical/orfs — Stage 6: RTL-to-GDS
+# physical/orfs — Stage 6/7: RTL-to-GDS
 
-Pushes the synthesizable TinyVAD accelerator core ([`rtl/accel/`](../../rtl/accel))
-through OpenROAD-flow-scripts (Yosys synthesis → OpenROAD floorplan / place / CTS
-/ route → GDS) to get real area, timing, and power numbers.
+Pushes synthesizable accelerator cores ([`rtl/accel/`](../../rtl/accel)) through
+OpenROAD-flow-scripts (Yosys synthesis → OpenROAD floorplan / place / CTS /
+route → GDS) to get real area, timing, and power numbers. Two designs live
+here: the original Stage 6 TinyVAD core (`tinymac_accel`) and the Stage 7
+QuartzNet ASR core (`quartznet_accel`).
 
 ## What gets synthesized
 
-Just the **accelerator compute core** `tinymac_accel` — the int8 MAC array,
-accumulator, and requantize datapath (plus its sequencer FSM). Not the PicoRV32,
-not main RAM. This is the block whose area/timing the Stage-5 knobs (`LANES`,
-`ACC_W`) actually move, and it is small and synchronous — the safe choice for a
-first GDS (project plan, Stage 6 "Option A").
+**`tinymac_accel`** — the int8 MAC array, accumulator, and requantize
+datapath (plus its sequencer FSM). Not the PicoRV32, not main RAM. This is
+the block whose area/timing the Stage-5 knobs (`LANES`, `ACC_W`) actually
+move, and it is small and synchronous — the safe choice for a first GDS
+(project plan, Stage 6 "Option A"). Default parameters are the Stage-5 grid
+optimum: `LANES=4`, `ACC_W=24`.
 
-Default parameters are the Stage-5 grid optimum: `LANES=4`, `ACC_W=24`.
+**`quartznet_accel`** — the Stage 7 descriptor-table-driven accelerator
+(`addr_gen`/`int8_mac_array`/`requantize`/`requantize_add`, autonomous
+table-walk sequencer), LANES=32 ACC_W=32 (the real design point). Its
+`ext_mem_if.v` memory model is deliberately non-synthesizable (a Verilator
+behavioral stand-in for a QSPI/PSRAM controller never built as RTL), so this
+flow substitutes a real-logic-preserving synthesis stub in its place — see
+`physical/orfs/stubs/ext_mem_if_synth.v` and
+[`docs/07l_quartznet_accel_gds.md`](../../docs/07l_quartznet_accel_gds.md)
+for the full reasoning and first measured results (120,653 µm², 0 DRC,
+150.96 MHz bring-up config).
 
 ## Synthesis (works offline — start here)
 
@@ -35,9 +47,12 @@ just three files per platform — `config.mk`, `constraint.sdc`, and the RTL —
 under `make/<platform>/tinymac_accel/`.
 
 ```bash
-physical/orfs/make/run.sh                       # one config, nangate45, through GDS
+physical/orfs/make/run.sh                       # tinymac_accel, nangate45, through GDS
 physical/orfs/make/run.sh nangate45 gui_final   # + open the OpenROAD GUI
 physical/orfs/make/sweep.sh                     # LANES sweep → sweep_results.csv
+
+physical/orfs/make/run_quartznet.sh              # quartznet_accel, nangate45, through GDS
+physical/orfs/make/run_quartznet.sh nangate45 synth   # stop after synthesis
 ```
 
 Platforms configured: **nangate45** (45 nm, primary), **asap7** (7 nm-class
@@ -59,8 +74,12 @@ multi-fidelity funnel optimizer that calls this same ORFS make flow).
 |------|---------|
 | `make/<platform>/tinymac_accel/config.mk` | ORFS design config (RTL list, clock, util/density) |
 | `make/<platform>/tinymac_accel/constraint.sdc` | clock definition (platform-native time unit) |
-| `make/run.sh` | stage design files into ORFS and run one full flow |
+| `make/run.sh` | stage tinymac_accel files into ORFS and run one full flow |
 | `make/sweep.sh` | parameter sweep via `VERILOG_TOP_PARAMS` + per-config `FLOW_VARIANT` |
+| `make/<platform>/quartznet_accel/config.mk` | ORFS design config for the QuartzNet accelerator (LANES=32 ACC_W=32) |
+| `make/<platform>/quartznet_accel/constraint.sdc` | clock definition for `quartznet_accel` |
+| `make/run_quartznet.sh` | stage quartznet_accel files (+ the `ext_mem_if` synthesis stub) and run one full flow |
+| `stubs/ext_mem_if_synth.v` | synthesizable stand-in for the deliberately non-synthesizable `rtl/accel/ext_mem_if.v` |
 | `synth_area.sh` | yosys-only area sweep, runs anywhere |
 
 ## Results

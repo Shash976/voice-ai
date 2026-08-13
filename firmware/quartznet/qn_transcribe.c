@@ -1,31 +1,39 @@
 /* qn_transcribe.c
  *
- * mp3-to-text mechanical smoke test: loads a real (audio-derived) int8 input
- * blob -- produced by sw/tinyml_reference/mp3_to_text.py, NOT the golden's
- * seeded-random input -- runs it through the C interpreter against a chosen
- * model's seeded-random weights/qparams (from `make goldens`), and prints the
- * CTC-decoded transcript.
+ * mp3-to-text: loads a real (audio-derived) int8 input blob -- produced by
+ * sw/tinyml_reference/mp3_to_text.py, NOT the golden's seeded-random input
+ * -- runs it through the C interpreter against a chosen model's
+ * weights/qparams, and prints the CTC-decoded transcript.
  *
- * There is no golden to compare against here: (random weights, qparams
- * calibrated against random input) vs (real mp3 features) is a numerics
- * mismatch by construction, so the transcript is expected to be gibberish.
- * This binary only proves the plumbing: mp3 -> quartznet_audio.py ->
+ * With NO arguments (the sweep below), MODEL_DIR is one of the two
+ * seeded-random build configs (`make goldens`): (random weights, qparams
+ * calibrated against random input) vs real mp3 features is a numerics
+ * mismatch by construction, so that transcript is expected to be gibberish
+ * -- this only proves the plumbing: mp3 -> quartznet_audio.py ->
  * mp3_input.bin -> qn_load/qn_set_input/qn_run -> qn_ctc_greedy -> a real
- * string over the 29-class vocabulary. Real (trained, PTQ'd) weights are a
- * separate, later phase.
+ * string over the 29-class vocabulary.
  *
- * Build:  make transcribe MP3=path/to/clip.mp3
+ * Pointed at REAL calibrated weights (explicit MODEL_DIR argv, e.g.
+ * ../../build/quartznet_real from quartznet_export_int8.py -- Stage 7 Gap 2
+ * A5/A6), the transcript is real English -- this is G2.6's actual
+ * deliverable, `make transcribe-real MP3=...`.
+ *
+ * Build:  make transcribe MP3=path/to/clip.mp3        (seeded-random sweep)
+ *         make transcribe-real MP3=path/to/clip.mp3   (real weights, A6)
  *         (or: make qn_transcribe, then run it directly -- see usage below)
  *
  * Usage:  ./qn_transcribe [MODEL_DIR INPUT_BLOB [T_OUT]]
  *   MODEL_DIR   directory with quartznet_desc.bin/quartznet_weights.bin/
- *               quartznet_qparams.bin (e.g. ../../build/quartznet[_reduced])
+ *               quartznet_qparams.bin (e.g. ../../build/quartznet[_reduced]
+ *               or ../../build/quartznet_real)
  *   INPUT_BLOB  int8 [t_in, in_ch] blob, e.g. ../../build/quartznet/mp3_input.bin
  *   T_OUT       output frame count; if omitted, read from INPUT_BLOB's
  *               sibling ".t_out" sidecar (mp3_to_text.py writes one)
  *
  * With no arguments, sweeps the default synthetic-clip input against both
- * build configs -- mirrors test_quartznet_host.c's dual-config pattern.
+ * seeded-random build configs -- mirrors test_quartznet_host.c's
+ * dual-config pattern. Every run also prints a "TRANSCRIPT\t<text>" line,
+ * meant for a driver script to parse (Stage 7 Gap 2 A6's WER gate).
  */
 
 #include <stdio.h>
@@ -88,7 +96,8 @@ static int read_tout_sidecar(const char *input_blob_path)
 
 /* ── One (model, input) pair ───────────────────────────────────────────────── */
 
-static int run_one(const char *model_dir, const char *input_path, int t_out)
+static int run_one(const char *model_dir, const char *input_path, int t_out,
+                   int expect_gibberish)
 {
     char p[1024];
 
@@ -134,8 +143,10 @@ static int run_one(const char *model_dir, const char *input_path, int t_out)
     int nsym = qn_ctc_greedy(&model, text_buf, (int)sizeof text_buf);
     if (nsym < 0) { fprintf(stderr, "  qn_ctc_greedy failed: %d\n", nsym); return -1; }
 
-    printf("  transcript (%d symbols, gibberish expected -- seeded-random "
-           "weights): \"%s\"\n", nsym, text_buf);
+    printf("  transcript (%d symbols%s): \"%s\"\n", nsym,
+           expect_gibberish ? ", gibberish expected -- seeded-random weights" : "",
+           text_buf);
+    printf("TRANSCRIPT\t%s\n", text_buf);  /* machine-readable, one line, tab-delimited */
     return 0;
 }
 
@@ -151,7 +162,7 @@ int main(int argc, char **argv)
             : "../../build/quartznet/mp3_input.bin";
         int t_out = (argc >= 4) ? atoi(argv[3]) : read_tout_sidecar(input_path);
         if (t_out <= 0) return 1;
-        return run_one(model_dir, input_path, t_out) == 0 ? 0 : 1;
+        return run_one(model_dir, input_path, t_out, /*expect_gibberish=*/0) == 0 ? 0 : 1;
     }
 
     static const char *dirs[] = {
@@ -168,7 +179,7 @@ int main(int argc, char **argv)
 
     int bad = 0;
     for (int i = 0; i < 2; i++)
-        if (run_one(dirs[i], input_path, t_out) != 0) bad++;
+        if (run_one(dirs[i], input_path, t_out, /*expect_gibberish=*/1) != 0) bad++;
 
     printf("\n%s\n", bad
            ? "FAIL (plumbing broke)"

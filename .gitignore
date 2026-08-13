@@ -41,8 +41,9 @@ firmware/quartznet/qn_input.h
 sim/verilator/obj_dir/
 sim/verilator/sim_picorv32
 sim/verilator_qn/obj_dir/
+sim/verilator_qn/obj_dir_rtl_*/
 sim/verilator_qn/sim_qn_shim
-sim/verilator_qn/sim_qn_rtl
+sim/verilator_qn/sim_qn_rtl*
 sim/verilator_qn/sim_out.vcd
 sim/verilator/sim_picorv32_debug
 sim/verilator/sim_out.vcd
